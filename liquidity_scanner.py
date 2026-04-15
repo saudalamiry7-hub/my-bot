@@ -11,8 +11,8 @@ DEFAULT_CONFIG = {
     "market_cap_max": 900000000,
     "check_interval": 300,
     "alert_cooldown_hours": 6,
-    "min_signal_strength": 3.7,
-    "strong_signal_threshold": 4.1,
+    "min_signal_strength": 3.8,           # الحد الأدنى للإشارات العادية
+    "strong_signal_threshold": 4.3,       # الاستثناء القوي
     "active_sectors_weight": 1.5,
     "telegram_token": "8509548153:AAE1nrJeE9u9x9MEQvYr-MvEo7wNE5YfYfE",
     "chat_id": "873875241",
@@ -65,36 +65,59 @@ def get_coins_market():
         print(f"❌ خطأ في جلب بيانات CoinGecko: {e}")
         return []
 
-# ====================== Regime Filter ======================
-def get_market_regime():
+# ====================== Market Sentiment Filter (الجديد والاحترافي) ======================
+def get_market_sentiment():
     try:
-        market = requests.get("https://api.coingecko.com/api/v3/global", timeout=15).json()
-        btc_dominance = market["data"]["market_cap_percentage"]["btc"]
-        market_cap_change = market["data"]["market_cap_change_percentage_24h_usd"]
+        # 1. Total Market Cap Trend
+        global_data = requests.get("https://api.coingecko.com/api/v3/global", timeout=15).json()["data"]
+        market_cap_change_24h = global_data["market_cap_change_percentage_24h_usd"]
+        
+        # 2. BTC Dominance (للمقارنة)
+        btc_dominance = global_data["market_cap_percentage"]["btc"]
+        
+        # 3. ETH/BTC Ratio Trend (نحتاج بيانات إضافية)
+        eth_btc = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=ethereum,bitcoin&vs_currencies=usd&include_24hr_change=true", timeout=15).json()
+        eth_change = eth_btc["ethereum"]["usd_24h_change"]
+        btc_change = eth_btc["bitcoin"]["usd_24h_change"]
+        eth_btc_ratio_change = eth_change - btc_change if eth_change and btc_change else 0
 
-        if btc_dominance > 54.5:
-            regime = "Bearish"
-            score = 0.3
-        elif btc_dominance < 50.5:
-            regime = "Bullish"
-            score = 1.0
+        # 4. Market Breadth (نسبة العملات الصاعدة)
+        coins = get_coins_market()
+        positive_coins = sum(1 for c in coins if c.get("price_change_percentage_24h", 0) > 0)
+        market_breadth = positive_coins / len(coins) if coins else 0.5
+
+        # حساب Sentiment Score (0 إلى 1.0)
+        score = 0.0
+        score += 0.35 * (1 if market_cap_change_24h > 0.5 else 0.3 if market_cap_change_24h > -0.5 else 0.0)
+        score += 0.30 * (1 if eth_btc_ratio_change > 0 else 0.5 if eth_btc_ratio_change > -1 else 0.0)
+        score += 0.20 * (1 if market_breadth > 0.55 else 0.6 if market_breadth > 0.45 else 0.2)
+        score += 0.15 * (1 if btc_dominance < 53 else 0.6 if btc_dominance < 55.5 else 0.2)
+
+        score = round(min(max(score, 0.0), 1.0), 2)
+
+        if score >= 0.75:
+            sentiment = "Bullish"
+        elif score >= 0.45:
+            sentiment = "Neutral"
         else:
-            regime = "Neutral"
-            score = 0.7
+            sentiment = "Bearish"
 
-        print(f"🌍 Regime: {regime} | BTC Dom: {btc_dominance:.2f}% | Market Change: {market_cap_change:.2f}%")
+        print(f"🌍 Market Sentiment: {sentiment} | Score: {score} | BTC Dom: {btc_dominance:.2f}%")
+
         return {
-            "regime": regime,
+            "sentiment": sentiment,
             "score": score,
-            "btc_dominance": round(btc_dominance, 2),
-            "market_cap_change": round(market_cap_change, 2)
+            "btc_dominance": btc_dominance,
+            "market_cap_change": market_cap_change_24h,
+            "eth_btc_ratio_change": eth_btc_ratio_change,
+            "market_breadth": market_breadth
         }
     except Exception as e:
-        print(f"⚠️ خطأ في جلب Regime: {e}")
-        return {"regime": "Neutral", "score": 0.7, "btc_dominance": 52.0, "market_cap_change": 0}
+        print(f"⚠️ خطأ في جلب Market Sentiment: {e}")
+        return {"sentiment": "Neutral", "score": 0.65, "btc_dominance": 52.0, "market_cap_change": 0}
 
 # ====================== التحليل الرئيسي ======================
-def analyze_coin(coin, cfg, regime):
+def analyze_coin(coin, cfg, sentiment):
     symbol = coin.get("symbol", "").upper()
     name = coin.get("name", "")
     price = coin.get("current_price", 0)
@@ -109,9 +132,8 @@ def analyze_coin(coin, cfg, regime):
     volume_score = 0.7 if volume_24h > 60000000 else 0.4
 
     base_strength = (liquidity_score + squeeze_score + volume_score) / 3 * 5
-    strength = round(min(base_strength * regime["score"], 5.0), 1)
+    strength = round(min(base_strength * sentiment["score"], 5.0), 1)
 
-            # رفض الإشارة إذا كانت ضعيفة
     if strength < cfg["min_signal_strength"] and strength < cfg["strong_signal_threshold"]:
         return None
 
@@ -125,9 +147,9 @@ def analyze_coin(coin, cfg, regime):
         "strength": strength,
         "confidence": confidence,
         "direction": "Long",
-        "expectation": "صعودي (Liquidity Grab)",
+        "expectation": "صعودي (Liquidity Rotation)",
         "sector": "غير محدد",
-        "reason": f"Regime: {regime['regime']} + سيولة قوية",
+        "reason": f"Sentiment: {sentiment['sentiment']} (Score: {sentiment['score']})",
         "risk": "متوسطة",
         "timeframe": "12-48 ساعة",
         "entry": f"{price*0.99:.4f} - {price*1.02:.4f}",
@@ -159,22 +181,22 @@ TP2: {signal["tp2"]}
 # ====================== الدورة الرئيسية ======================
 def main():
     cfg = load_config()
-    send_telegram("🤖 Liquidity Rotation Scanner v2\n✅ تم تشغيل النظام مع Regime Filter", cfg)
-    print("✅ النظام v2 يعمل الآن مع Regime Filter...")
+    send_telegram("🤖 Liquidity Rotation Scanner v2.5\n✅ تم تشغيل النظام مع Market Sentiment Filter", cfg)
+    print("✅ النظام v2.5 يعمل الآن مع Market Sentiment Filter...")
 
     last_alert = {}
     last_strength = {}
 
     while True:
         try:
-            regime = get_market_regime()
+            sentiment = get_market_sentiment()
             coins = get_coins_market()
 
             print(f"جاري تحليل {len(coins)} عملة...")
 
             alert_count = 0
             for coin in coins:
-                signal = analyze_coin(coin, cfg, regime)
+                signal = analyze_coin(coin, cfg, sentiment)
                 if not signal:
                     continue
 
@@ -205,7 +227,7 @@ def main():
                         last_alert[symbol] = current_time
                         last_strength[symbol] = current_strength
 
-                time.sleep(0.5)  # تأخير أقل لتسريع الفحص
+                time.sleep(0.5)
 
             print(f"✅ انتهى الفحص - تم إرسال {alert_count} تنبيه")
 
