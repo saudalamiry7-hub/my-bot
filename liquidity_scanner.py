@@ -11,8 +11,8 @@ DEFAULT_CONFIG = {
     "market_cap_max": 900000000,
     "check_interval": 300,
     "alert_cooldown_hours": 6,
-    "min_signal_strength": 4.0,           # الحد الأدنى للإشارات العادية
-    "strong_signal_threshold": 4.3,       # الاستثناء القوي
+    "min_signal_strength": 4.0,
+    "strong_signal_threshold": 4.3,
     "active_sectors_weight": 1.5,
     "telegram_token": "8509548153:AAE1nrJeE9u9x9MEQvYr-MvEo7wNE5YfYfE",
     "chat_id": "873875241",
@@ -44,17 +44,31 @@ def send_telegram(message, cfg):
     except Exception as e:
         print(f"خطأ في إرسال تيليغرام: {e}")
 
-# ====================== Regime Filter (الجديد) ======================
+# ====================== جلب بيانات العملات ======================
+def get_coins_market():
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/coins/markets",
+            params={
+                "vs_currency": "usd",
+                "order": "volume_desc",
+                "per_page": 500,
+                "page": 1,
+                "price_change_percentage": "24h,7d"
+            },
+            timeout=20
+        )
+        return r.json()
+    except Exception as e:
+        print(f"خطأ في جلب بيانات CoinGecko: {e}")
+        return []
+
+# ====================== Regime Filter ======================
 def get_market_regime():
     try:
-        # Total Market Cap
         market = requests.get("https://api.coingecko.com/api/v3/global", timeout=15).json()
-        total_market_cap = market["data"]["total_market_cap"]["usd"]
+        btc_dominance = market["data"]["market_cap_percentage"]["btc"]
         market_cap_change = market["data"]["market_cap_change_percentage_24h_usd"]
-
-        # BTC Dominance
-        dominance_data = requests.get("https://api.coingecko.com/api/v3/global", timeout=15).json()
-        btc_dominance = dominance_data["data"]["market_cap_percentage"]["btc"]
 
         if btc_dominance > 54.5:
             regime = "Bearish"
@@ -81,55 +95,33 @@ def analyze_coin(coin, cfg, regime):
     name = coin.get("name", "")
     price = coin.get("current_price", 0)
     market_cap = coin.get("market_cap", 0) or 0
-    change_24h = coin.get("price_change_percentage_24h", 0) or 0
     volume_24h = coin.get("total_volume", 0) or 0
 
-    # 1. فلتر الماركت كاب
     if not (cfg["market_cap_min"] <= market_cap <= cfg["market_cap_max"]):
         return None
 
-    # 2. Liquidity Score (مؤقت - سنطوره)
     liquidity_score = 0.85
-
-    # 3. Squeeze Score (مؤقت)
     squeeze_score = 0.75
-
-    # 4. Volume Confirmation (نسبي)
     volume_score = 0.7 if volume_24h > 60000000 else 0.4
 
-    # 5. Sector Strength
-    sector = "غير محدد"
-
-    # حساب القوة الأساسية
     base_strength = (liquidity_score + squeeze_score + volume_score) / 3 * 5
     strength = round(min(base_strength * regime["score"], 5.0), 1)
 
-    # استثناء القوة العالية
     if strength < cfg["min_signal_strength"] and strength < cfg["strong_signal_threshold"]:
         return None
 
-    # مستوى الثقة
-    if strength >= 4.3:
-        confidence = "High"
-    elif strength >= 3.8:
-        confidence = "Medium"
-    else:
-        confidence = "Low"
-
-    direction = "Long"
-    expectation = "صعودي (Liquidity Grab)"
+    confidence = "High" if strength >= 4.3 else "Medium" if strength >= 3.8 else "Low"
 
     signal = {
         "symbol": symbol,
         "name": name,
         "price": price,
         "market_cap": market_cap,
-        "change_24h": change_24h,
         "strength": strength,
         "confidence": confidence,
-        "direction": direction,
-        "expectation": expectation,
-        "sector": sector,
+        "direction": "Long",
+        "expectation": "صعودي (Liquidity Grab)",
+        "sector": "غير محدد",
         "reason": f"Regime: {regime['regime']} + سيولة قوية",
         "risk": "متوسطة",
         "timeframe": "12-48 ساعة",
@@ -138,24 +130,18 @@ def analyze_coin(coin, cfg, regime):
         "tp1": f"{price*1.08:.4f}",
         "tp2": f"{price*1.15:.4f}"
     }
-
     return signal
 
 # ====================== توليد التنبيه ======================
 def generate_alert(signal):
-    if not signal or signal["strength"] < 3.0:
-        return None
-
     msg = f"""🔥 إشارة {signal["direction"]} - قوة {signal["strength"]:.1f}/5
 
 {signal["name"]} ({signal["symbol"]}) • ${signal["price"]:.4f} • MC: ${signal["market_cap"]/1000000:.0f}M
-قطاع: {signal["sector"]}
 
 التوقع: {signal["expectation"]}
-
 الثقة: {signal["confidence"]}
 المخاطرة: {signal["risk"]}
-الوقت المتوقع: {signal["timeframe"]}
+الوقت: {signal["timeframe"]}
 
 سيناريو:
 دخول: {signal["entry"]}
