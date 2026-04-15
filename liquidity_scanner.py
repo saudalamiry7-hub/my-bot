@@ -111,9 +111,9 @@ def analyze_coin(coin, cfg, regime):
     base_strength = (liquidity_score + squeeze_score + volume_score) / 3 * 5
     strength = round(min(base_strength * regime["score"], 5.0), 1)
 
-        if strength < cfg["min_signal_strength"] and strength < cfg["strong_signal_threshold"]:
-        # print(f"رفض {symbol} - القوة {strength:.1f} أقل من الحد الأدنى")
-        return None
+            # رفض الإشارة إذا كانت ضعيفة
+    if strength < cfg["min_signal_strength"] and strength < cfg["strong_signal_threshold"]:
+    return None
 
     confidence = "High" if strength >= 4.3 else "Medium" if strength >= 3.8 else "Low"
 
