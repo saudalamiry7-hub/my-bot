@@ -11,9 +11,10 @@ DEFAULT_CONFIG = {
     "market_cap_max": 900000000,
     "check_interval": 300,
     "alert_cooldown_hours": 6,
-    "min_signal_strength": 3.5,          # تم رفعه إلى 3.5
+    "min_signal_strength": 4.0,           # الحد الأدنى للإشارات العادية
+    "strong_signal_threshold": 4.3,       # الاستثناء القوي
     "active_sectors_weight": 1.5,
-    "telegram_token": "8509548153:AAE1nrJeE9u9x9MEQvYr-MvEo7wNE5YfYfE",  # التوكن الجديد
+    "telegram_token": "8509548153:AAE1nrJeE9u9x9MEQvYr-MvEo7wNE5YfYfE",
     "chat_id": "873875241",
     "active_sectors": [
         "ai", "artificial-intelligence", "gaming", "rwa", "real-world-assets",
@@ -43,27 +44,39 @@ def send_telegram(message, cfg):
     except Exception as e:
         print(f"خطأ في إرسال تيليغرام: {e}")
 
-# ====================== جمع البيانات ======================
-def get_coins_market():
+# ====================== Regime Filter (الجديد) ======================
+def get_market_regime():
     try:
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/coins/markets",
-            params={
-                "vs_currency": "usd",
-                "order": "volume_desc",
-                "per_page": 500,
-                "page": 1,
-                "price_change_percentage": "24h,7d"
-            },
-            timeout=20
-        )
-        return r.json()
-    except Exception as e:
-        print(f"خطأ في جلب بيانات CoinGecko: {e}")
-        return []
+        # Total Market Cap
+        market = requests.get("https://api.coingecko.com/api/v3/global", timeout=15).json()
+        total_market_cap = market["data"]["total_market_cap"]["usd"]
+        market_cap_change = market["data"]["market_cap_change_percentage_24h_usd"]
+
+        # BTC Dominance
+        dominance_data = requests.get("https://api.coingecko.com/api/v3/global", timeout=15).json()
+        btc_dominance = dominance_data["data"]["market_cap_percentage"]["btc"]
+
+        if btc_dominance > 54.5:
+            regime = "Bearish"
+            score = 0.3
+        elif btc_dominance < 50.5:
+            regime = "Bullish"
+            score = 1.0
+        else:
+            regime = "Neutral"
+            score = 0.7
+
+        return {
+            "regime": regime,
+            "score": score,
+            "btc_dominance": round(btc_dominance, 2),
+            "market_cap_change": round(market_cap_change, 2)
+        }
+    except:
+        return {"regime": "Neutral", "score": 0.7, "btc_dominance": 52.0, "market_cap_change": 0}
 
 # ====================== التحليل الرئيسي ======================
-def analyze_coin(coin, cfg):
+def analyze_coin(coin, cfg, regime):
     symbol = coin.get("symbol", "").upper()
     name = coin.get("name", "")
     price = coin.get("current_price", 0)
@@ -71,39 +84,40 @@ def analyze_coin(coin, cfg):
     change_24h = coin.get("price_change_percentage_24h", 0) or 0
     volume_24h = coin.get("total_volume", 0) or 0
 
-    # فلتر الماركت كاب
+    # 1. فلتر الماركت كاب
     if not (cfg["market_cap_min"] <= market_cap <= cfg["market_cap_max"]):
         return None
 
-    # Regime Filter (مؤقتاً)
-    regime_ok = True
+    # 2. Liquidity Score (مؤقت - سنطوره)
+    liquidity_score = 0.85
 
-    # Liquidity Setup
-    liquidity_score = 0.8
+    # 3. Squeeze Score (مؤقت)
+    squeeze_score = 0.75
 
-    # Squeeze Signal
-    squeeze_score = 0.7
+    # 4. Volume Confirmation (نسبي)
+    volume_score = 0.7 if volume_24h > 60000000 else 0.4
 
-    # Volume Confirmation
-    volume_score = 0.6 if volume_24h > 50000000 else 0.3
-
-    # Sector Strength
+    # 5. Sector Strength
     sector = "غير محدد"
 
-    # حساب قوة الإشارة من 5
+    # حساب القوة الأساسية
     base_strength = (liquidity_score + squeeze_score + volume_score) / 3 * 5
-    strength = round(min(base_strength * (cfg["active_sectors_weight"] if sector in cfg["active_sectors"] else 1.0), 5.0), 1)
+    strength = round(min(base_strength * regime["score"], 5.0), 1)
+
+    # استثناء القوة العالية
+    if strength < cfg["min_signal_strength"] and strength < cfg["strong_signal_threshold"]:
+        return None
 
     # مستوى الثقة
-    if strength >= 4.0:
+    if strength >= 4.3:
         confidence = "High"
-    elif strength >= 3.0:
+    elif strength >= 3.8:
         confidence = "Medium"
     else:
         confidence = "Low"
 
     direction = "Long"
-    expectation = "صعودي (احتمال Liquidity Grab)"
+    expectation = "صعودي (Liquidity Grab)"
 
     signal = {
         "symbol": symbol,
@@ -116,13 +130,13 @@ def analyze_coin(coin, cfg):
         "direction": direction,
         "expectation": expectation,
         "sector": sector,
-        "reason": "اقتراب من منطقة سيولة + حجم جيد",
+        "reason": f"Regime: {regime['regime']} + سيولة قوية",
         "risk": "متوسطة",
         "timeframe": "12-48 ساعة",
         "entry": f"{price*0.99:.4f} - {price*1.02:.4f}",
-        "stop_loss": f"{price*0.96:.4f}",
-        "tp1": f"{price*1.06:.4f}",
-        "tp2": f"{price*1.12:.4f}"
+        "stop_loss": f"{price*0.95:.4f}",
+        "tp1": f"{price*1.08:.4f}",
+        "tp2": f"{price*1.15:.4f}"
     }
 
     return signal
@@ -154,19 +168,21 @@ TP2: {signal["tp2"]}
 # ====================== الدورة الرئيسية ======================
 def main():
     cfg = load_config()
-    send_telegram("🤖 Liquidity Rotation Scanner v1\n✅ تم تشغيل النظام بنجاح (مع نظام تكرار ذكي)", cfg)
-    print("✅ النظام يعمل الآن مع نظام تكرار ذكي...")
+    send_telegram("🤖 Liquidity Rotation Scanner v2\n✅ تم تشغيل النظام مع Regime Filter", cfg)
+    print("✅ النظام v2 يعمل الآن مع Regime Filter...")
 
-    last_alert = {}        # آخر وقت تنبيه لكل عملة
-    last_strength = {}     # آخر قوة إشارة لكل عملة
+    last_alert = {}
+    last_strength = {}
 
     while True:
         try:
+            regime = get_market_regime()
+            print(f"Regime: {regime['regime']} | BTC Dom: {regime['btc_dominance']}%")
+
             coins = get_coins_market()
-            print(f"جاري فحص {len(coins)} عملة...")
 
             for coin in coins:
-                signal = analyze_coin(coin, cfg)
+                signal = analyze_coin(coin, cfg, regime)
                 if not signal:
                     continue
 
@@ -174,7 +190,6 @@ def main():
                 current_strength = signal["strength"]
                 current_time = time.time()
 
-                # نظام التكرار الذكي
                 should_send = False
 
                 if symbol not in last_alert:
@@ -183,9 +198,9 @@ def main():
                     time_diff = current_time - last_alert[symbol]
                     strength_diff = current_strength - last_strength.get(symbol, 0)
 
-                    if strength_diff >= 0.5:           # زيادة في القوة
+                    if current_strength >= cfg["strong_signal_threshold"]:
                         should_send = True
-                    elif time_diff >= cfg["alert_cooldown_hours"] * 3600:
+                    elif strength_diff >= 0.5 or time_diff >= cfg["alert_cooldown_hours"] * 3600:
                         should_send = True
 
                 if should_send:
@@ -194,7 +209,6 @@ def main():
                         send_telegram(alert_msg, cfg)
                         print(f"✅ تم إرسال تنبيه: {symbol} | قوة {current_strength}/5")
 
-                        # حفظ آخر تنبيه
                         last_alert[symbol] = current_time
                         last_strength[symbol] = current_strength
 
