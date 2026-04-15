@@ -113,7 +113,7 @@ def analyze_coin(coin, cfg, regime):
 
             # رفض الإشارة إذا كانت ضعيفة
     if strength < cfg["min_signal_strength"] and strength < cfg["strong_signal_threshold"]:
-    return None
+        return None
 
     confidence = "High" if strength >= 4.3 else "Medium" if strength >= 3.8 else "Low"
 
