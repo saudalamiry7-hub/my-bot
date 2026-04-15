@@ -11,8 +11,8 @@ DEFAULT_CONFIG = {
     "market_cap_max": 900000000,
     "check_interval": 300,
     "alert_cooldown_hours": 6,
-    "min_signal_strength": 4.0,
-    "strong_signal_threshold": 4.3,
+    "min_signal_strength": 3.7,
+    "strong_signal_threshold": 4.1,
     "active_sectors_weight": 1.5,
     "telegram_token": "8509548153:AAE1nrJeE9u9x9MEQvYr-MvEo7wNE5YfYfE",
     "chat_id": "873875241",
@@ -111,7 +111,8 @@ def analyze_coin(coin, cfg, regime):
     base_strength = (liquidity_score + squeeze_score + volume_score) / 3 * 5
     strength = round(min(base_strength * regime["score"], 5.0), 1)
 
-    if strength < cfg["min_signal_strength"] and strength < cfg["strong_signal_threshold"]:
+        if strength < cfg["min_signal_strength"] and strength < cfg["strong_signal_threshold"]:
+        # print(f"رفض {symbol} - القوة {strength:.1f} أقل من الحد الأدنى")
         return None
 
     confidence = "High" if strength >= 4.3 else "Medium" if strength >= 3.8 else "Low"
