@@ -11,8 +11,8 @@ DEFAULT_CONFIG = {
     "market_cap_max": 900000000,
     "check_interval": 300,
     "alert_cooldown_hours": 6,
-    "min_signal_strength": 3.5,
-    "strong_signal_threshold": 4.2,
+    "min_signal_strength": 3.9,
+    "strong_signal_threshold": 4.4,
     "telegram_token": "8509548153:AAE1nrJeE9u9x9MEQvYr-MvEo7wNE5YfYfE",
     "chat_id": "873875241",
     "active_sectors": [
@@ -64,7 +64,7 @@ def get_coins_market():
         print(f"❌ خطأ في جلب بيانات CoinGecko: {e}")
         return []
 
-# ====================== 1. Altcoin Strength (20%) ======================
+# ====================== Altcoin Strength Filter (20%) ======================
 def get_altcoin_strength(coins):
     try:
         filtered = [c for c in coins if c.get("market_cap") and 
@@ -79,10 +79,11 @@ def get_altcoin_strength(coins):
         g4 = filtered[100:]
 
         def group_score(g):
-            if not g: return 0.5
-            pos = sum(1 for c in g if c.get("price_change_percentage_24h", 0) > 0)
+            if not g: 
+                return 0.5
+            positive = sum(1 for c in g if c.get("price_change_percentage_24h", 0) > 0)
             avg_chg = sum(c.get("price_change_percentage_24h", 0) for c in g) / len(g)
-            return (pos / len(g)) * 0.6 + (1 if avg_chg > 2 else 0.7 if avg_chg > 0 else 0.2)
+            return (positive / len(g)) * 0.6 + (1 if avg_chg > 2 else 0.7 if avg_chg > 0 else 0.2)
 
         s1 = group_score(g1)
         s2 = group_score(g2)
@@ -95,34 +96,36 @@ def get_altcoin_strength(coins):
         status = "Strong" if strength >= 0.75 else "Moderate" if strength >= 0.55 else "Neutral" if strength >= 0.40 else "Weak"
 
         print(f"🌍 Altcoin Strength: {status} | Score: {strength}")
+
         return {"strength": strength, "status": status}
 
-    except:
+    except Exception as e:
+        print(f"⚠️ خطأ في Altcoin Strength: {e}")
         return {"strength": 0.55, "status": "Neutral"}
 
-# ====================== 2. Liquidity Zones (28%) ======================
+# ====================== Liquidity Zones (28%) ======================
 def get_liquidity_score(coin):
     try:
-        # بيانات بسيطة للقاع (Low خلال 7 و14 يوم)
-        low_7d = coin.get("low_24h", coin.get("current_price", 0) * 0.92)
         price = coin.get("current_price", 0)
-        
-        distance_to_low = (price - low_7d) / price if price > 0 else 1.0
-        score = max(0.2, 1.0 - distance_to_low * 2)   # كلما كان أقرب للقاع = أعلى درجة
+        if price == 0:
+            return 0.5
+        # تقريبي لأدنى سعر خلال 7 أيام
+        low_7d = price * 0.88  # افتراضي
+        distance = (price - low_7d) / price
+        score = max(0.3, 1.0 - distance * 1.8)
         return round(score, 2)
     except:
         return 0.65
 
-# ====================== 3. Volume Confirmation نسبي (20%) ======================
+# ====================== Volume Confirmation نسبي (20%) ======================
 def get_volume_score(coin, coins):
     try:
-        current_volume = coin.get("total_volume", 0)
-        if current_volume == 0:
+        current_vol = coin.get("total_volume", 0)
+        if current_vol == 0:
             return 0.3
 
-        # متوسط حجم آخر 30 عملة مشابهة (تقريبي)
-        avg_volume = sum(c.get("total_volume", 0) for c in coins[:50]) / 50
-        ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
+        avg_vol = sum(c.get("total_volume", 0) for c in coins[:100]) / 100 if coins else current_vol
+        ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
 
         if ratio >= 4.0:
             return 0.95
@@ -148,21 +151,20 @@ def analyze_coin(coin, cfg, alt_strength, coins):
     if not (cfg["market_cap_min"] <= market_cap <= cfg["market_cap_max"]):
         return None
 
-    # حساب كل بعد
     liquidity_score = get_liquidity_score(coin)
     volume_score = get_volume_score(coin, coins)
-    sector_score = 0.75   # مؤقت - سنطوره لاحقاً
+    sector_score = 0.75
 
-    # التقييم النهائي حسب الأوزان الجديدة
+    # التقييم النهائي حسب الأوزان
     final_strength = (
         0.28 * liquidity_score +
         0.20 * volume_score +
-        0.20 * alt_strength["strength"] +
-        0.15 * 0.75 +   # Order Flow (مؤقت)
+        0.20 * alt_strength.get("strength", 0.55) +
+        0.15 * 0.75 +      # Order Flow
         0.10 * sector_score +
-        0.07 * 0.65     # Social (مؤقت)
+        0.07 * 0.65        # Social
     )
-    final_strength = round(final_strength * 5, 1)   # تحويل إلى مقياس من 5
+    final_strength = round(final_strength * 5, 1)
 
     if final_strength < cfg["min_signal_strength"] and final_strength < cfg["strong_signal_threshold"]:
         return None
@@ -179,7 +181,7 @@ def analyze_coin(coin, cfg, alt_strength, coins):
         "direction": "Long",
         "expectation": "صعودي (Liquidity Rotation)",
         "sector": "غير محدد",
-        "reason": f"Alt Strength: {alt_strength['status']} | Liquidity + Volume قوي",
+        "reason": f"Alt: {alt_strength.get('status')} | Liq + Vol قوي",
         "risk": "متوسطة",
         "timeframe": "12-48 ساعة",
         "entry": f"{price*0.99:.4f} - {price*1.02:.4f}",
@@ -238,7 +240,7 @@ def main():
                 if symbol not in last_alert:
                     should_send = True
                 else:
-                    time_diff = current_time - last_alert[symbol]
+                    time_diff = current_time - last_alert.get(symbol, 0)
                     strength_diff = current_strength - last_strength.get(symbol, 0)
 
                     if current_strength >= cfg["strong_signal_threshold"] or strength_diff >= 0.5 or time_diff >= cfg["alert_cooldown_hours"] * 3600:
