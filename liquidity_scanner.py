@@ -11,9 +11,9 @@ DEFAULT_CONFIG = {
     "market_cap_max": 900000000,
     "check_interval": 300,
     "alert_cooldown_hours": 6,
-    "min_signal_strength": 3.5,
+    "min_signal_strength": 3.5,          # تم رفعه إلى 3.5
     "active_sectors_weight": 1.5,
-    "telegram_token": "8509548153:AAE1nrJeE9u9x9MEQvYr-MvEo7wNE5YfYfE",
+    "telegram_token": "8509548153:AAE1nrJeE9u9x9MEQvYr-MvEo7wNE5YfYfE",  # التوكن الجديد
     "chat_id": "873875241",
     "active_sectors": [
         "ai", "artificial-intelligence", "gaming", "rwa", "real-world-assets",
@@ -71,25 +71,24 @@ def analyze_coin(coin, cfg):
     change_24h = coin.get("price_change_percentage_24h", 0) or 0
     volume_24h = coin.get("total_volume", 0) or 0
 
-    # 1. فلتر الماركت كاب
+    # فلتر الماركت كاب
     if not (cfg["market_cap_min"] <= market_cap <= cfg["market_cap_max"]):
         return None
 
-    # 2. Regime Filter (مؤقتاً نفترض إيجابي)
+    # Regime Filter (مؤقتاً)
     regime_ok = True
 
-    # 3. Liquidity Setup
+    # Liquidity Setup
     liquidity_score = 0.8
 
-    # 4. Squeeze Signal
+    # Squeeze Signal
     squeeze_score = 0.7
 
-    # 5. Volume Confirmation
+    # Volume Confirmation
     volume_score = 0.6 if volume_24h > 50000000 else 0.3
 
-    # 6. Sector Strength
+    # Sector Strength
     sector = "غير محدد"
-    # سنطور هذا الجزء لاحقاً
 
     # حساب قوة الإشارة من 5
     base_strength = (liquidity_score + squeeze_score + volume_score) / 3 * 5
@@ -155,8 +154,11 @@ TP2: {signal["tp2"]}
 # ====================== الدورة الرئيسية ======================
 def main():
     cfg = load_config()
-    send_telegram("🤖 Liquidity Rotation Scanner v1\n✅ تم تشغيل النظام بنجاح", cfg)
-    print("✅ النظام يعمل الآن...")
+    send_telegram("🤖 Liquidity Rotation Scanner v1\n✅ تم تشغيل النظام بنجاح (مع نظام تكرار ذكي)", cfg)
+    print("✅ النظام يعمل الآن مع نظام تكرار ذكي...")
+
+    last_alert = {}        # آخر وقت تنبيه لكل عملة
+    last_strength = {}     # آخر قوة إشارة لكل عملة
 
     while True:
         try:
@@ -168,16 +170,41 @@ def main():
                 if not signal:
                     continue
 
-                alert_msg = generate_alert(signal)
-                if alert_msg:
-                    send_telegram(alert_msg, cfg)
-                    print(f"✅ تم إرسال تنبيه: {signal['symbol']} | قوة {signal['strength']}/5")
+                symbol = signal["symbol"]
+                current_strength = signal["strength"]
+                current_time = time.time()
 
-            time.sleep(cfg.get("check_interval", 300))
+                # نظام التكرار الذكي
+                should_send = False
+
+                if symbol not in last_alert:
+                    should_send = True
+                else:
+                    time_diff = current_time - last_alert[symbol]
+                    strength_diff = current_strength - last_strength.get(symbol, 0)
+
+                    if strength_diff >= 0.5:           # زيادة في القوة
+                        should_send = True
+                    elif time_diff >= cfg["alert_cooldown_hours"] * 3600:
+                        should_send = True
+
+                if should_send:
+                    alert_msg = generate_alert(signal)
+                    if alert_msg:
+                        send_telegram(alert_msg, cfg)
+                        print(f"✅ تم إرسال تنبيه: {symbol} | قوة {current_strength}/5")
+
+                        # حفظ آخر تنبيه
+                        last_alert[symbol] = current_time
+                        last_strength[symbol] = current_strength
+
+                time.sleep(1)
 
         except Exception as e:
             print(f"❌ خطأ: {e}")
             time.sleep(60)
+
+        time.sleep(cfg.get("check_interval", 300))
 
 if __name__ == "__main__":
     main()
