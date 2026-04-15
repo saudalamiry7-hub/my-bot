@@ -56,11 +56,13 @@ def get_coins_market():
                 "page": 1,
                 "price_change_percentage": "24h,7d"
             },
-            timeout=20
+            timeout=25
         )
-        return r.json()
+        data = r.json()
+        print(f"✅ تم جلب {len(data)} عملة بنجاح")
+        return data
     except Exception as e:
-        print(f"خطأ في جلب بيانات CoinGecko: {e}")
+        print(f"❌ خطأ في جلب بيانات CoinGecko: {e}")
         return []
 
 # ====================== Regime Filter ======================
@@ -80,13 +82,15 @@ def get_market_regime():
             regime = "Neutral"
             score = 0.7
 
+        print(f"🌍 Regime: {regime} | BTC Dom: {btc_dominance:.2f}% | Market Change: {market_cap_change:.2f}%")
         return {
             "regime": regime,
             "score": score,
             "btc_dominance": round(btc_dominance, 2),
             "market_cap_change": round(market_cap_change, 2)
         }
-    except:
+    except Exception as e:
+        print(f"⚠️ خطأ في جلب Regime: {e}")
         return {"regime": "Neutral", "score": 0.7, "btc_dominance": 52.0, "market_cap_change": 0}
 
 # ====================== التحليل الرئيسي ======================
@@ -163,10 +167,11 @@ def main():
     while True:
         try:
             regime = get_market_regime()
-            print(f"Regime: {regime['regime']} | BTC Dom: {regime['btc_dominance']}%")
-
             coins = get_coins_market()
 
+            print(f"جاري تحليل {len(coins)} عملة...")
+
+            alert_count = 0
             for coin in coins:
                 signal = analyze_coin(coin, cfg, regime)
                 if not signal:
@@ -194,14 +199,17 @@ def main():
                     if alert_msg:
                         send_telegram(alert_msg, cfg)
                         print(f"✅ تم إرسال تنبيه: {symbol} | قوة {current_strength}/5")
+                        alert_count += 1
 
                         last_alert[symbol] = current_time
                         last_strength[symbol] = current_strength
 
-                time.sleep(1)
+                time.sleep(0.5)  # تأخير أقل لتسريع الفحص
+
+            print(f"✅ انتهى الفحص - تم إرسال {alert_count} تنبيه")
 
         except Exception as e:
-            print(f"❌ خطأ: {e}")
+            print(f"❌ خطأ عام: {e}")
             time.sleep(60)
 
         time.sleep(cfg.get("check_interval", 300))
