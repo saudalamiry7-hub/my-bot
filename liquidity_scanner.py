@@ -11,8 +11,8 @@ DEFAULT_CONFIG = {
     "market_cap_max": 900000000,
     "check_interval": 300,
     "alert_cooldown_hours": 6,
-    "min_signal_strength": 3.8,           # الحد الأدنى للإشارات العادية
-    "strong_signal_threshold": 4.3,       # الاستثناء القوي
+    "min_signal_strength": 3.8,
+    "strong_signal_threshold": 4.3,
     "active_sectors_weight": 1.5,
     "telegram_token": "8509548153:AAE1nrJeE9u9x9MEQvYr-MvEo7wNE5YfYfE",
     "chat_id": "873875241",
@@ -65,30 +65,31 @@ def get_coins_market():
         print(f"❌ خطأ في جلب بيانات CoinGecko: {e}")
         return []
 
-# ====================== Market Sentiment Filter (الجديد والاحترافي) ======================
+# ====================== Market Sentiment Filter (المحسن والمصحح) ======================
 def get_market_sentiment():
     try:
-        # 1. Total Market Cap Trend
+        # Total Market Cap
         global_data = requests.get("https://api.coingecko.com/api/v3/global", timeout=15).json()["data"]
-        market_cap_change_24h = global_data["market_cap_change_percentage_24h_usd"]
-        
-        # 2. BTC Dominance (للمقارنة)
+        market_cap_change_24h = global_data.get("market_cap_change_percentage_24h_usd", 0)
         btc_dominance = global_data["market_cap_percentage"]["btc"]
-        
-        # 3. ETH/BTC Ratio Trend (نحتاج بيانات إضافية)
-        eth_btc = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=ethereum,bitcoin&vs_currencies=usd&include_24hr_change=true", timeout=15).json()
-        eth_change = eth_btc["ethereum"]["usd_24h_change"]
-        btc_change = eth_btc["bitcoin"]["usd_24h_change"]
+
+        # ETH/BTC Ratio Change
+        prices = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price?ids=ethereum,bitcoin&vs_currencies=usd&include_24hr_change=true",
+            timeout=15
+        ).json()
+        eth_change = prices.get("ethereum", {}).get("usd_24h_change", 0)
+        btc_change = prices.get("bitcoin", {}).get("usd_24h_change", 0)
         eth_btc_ratio_change = eth_change - btc_change if eth_change and btc_change else 0
 
-        # 4. Market Breadth (نسبة العملات الصاعدة)
+        # Market Breadth
         coins = get_coins_market()
         positive_coins = sum(1 for c in coins if c.get("price_change_percentage_24h", 0) > 0)
         market_breadth = positive_coins / len(coins) if coins else 0.5
 
-        # حساب Sentiment Score (0 إلى 1.0)
+        # حساب Sentiment Score
         score = 0.0
-        score += 0.35 * (1 if market_cap_change_24h > 0.5 else 0.3 if market_cap_change_24h > -0.5 else 0.0)
+        score += 0.35 * (1 if market_cap_change_24h > 0.5 else 0.5 if market_cap_change_24h > -0.5 else 0.0)
         score += 0.30 * (1 if eth_btc_ratio_change > 0 else 0.5 if eth_btc_ratio_change > -1 else 0.0)
         score += 0.20 * (1 if market_breadth > 0.55 else 0.6 if market_breadth > 0.45 else 0.2)
         score += 0.15 * (1 if btc_dominance < 53 else 0.6 if btc_dominance < 55.5 else 0.2)
@@ -107,14 +108,22 @@ def get_market_sentiment():
         return {
             "sentiment": sentiment,
             "score": score,
-            "btc_dominance": btc_dominance,
-            "market_cap_change": market_cap_change_24h,
-            "eth_btc_ratio_change": eth_btc_ratio_change,
-            "market_breadth": market_breadth
+            "btc_dominance": round(btc_dominance, 2),
+            "market_cap_change": round(market_cap_change_24h, 2),
+            "eth_btc_ratio_change": round(eth_btc_ratio_change, 2),
+            "market_breadth": round(market_breadth, 2)
         }
+
     except Exception as e:
         print(f"⚠️ خطأ في جلب Market Sentiment: {e}")
-        return {"sentiment": "Neutral", "score": 0.65, "btc_dominance": 52.0, "market_cap_change": 0}
+        return {
+            "sentiment": "Neutral",
+            "score": 0.65,
+            "btc_dominance": 52.0,
+            "market_cap_change": 0,
+            "eth_btc_ratio_change": 0,
+            "market_breadth": 0.5
+        }
 
 # ====================== التحليل الرئيسي ======================
 def analyze_coin(coin, cfg, sentiment):
@@ -132,7 +141,8 @@ def analyze_coin(coin, cfg, sentiment):
     volume_score = 0.7 if volume_24h > 60000000 else 0.4
 
     base_strength = (liquidity_score + squeeze_score + volume_score) / 3 * 5
-    strength = round(min(base_strength * sentiment["score"], 5.0), 1)
+    sentiment_score = sentiment.get("score", 0.65) if isinstance(sentiment, dict) else 0.65
+    strength = round(min(base_strength * sentiment_score, 5.0), 1)
 
     if strength < cfg["min_signal_strength"] and strength < cfg["strong_signal_threshold"]:
         return None
@@ -149,7 +159,7 @@ def analyze_coin(coin, cfg, sentiment):
         "direction": "Long",
         "expectation": "صعودي (Liquidity Rotation)",
         "sector": "غير محدد",
-        "reason": f"Sentiment: {sentiment['sentiment']} (Score: {sentiment['score']})",
+        "reason": f"Sentiment: {sentiment.get('sentiment', 'Neutral')} (Score: {sentiment_score})",
         "risk": "متوسطة",
         "timeframe": "12-48 ساعة",
         "entry": f"{price*0.99:.4f} - {price*1.02:.4f}",
@@ -209,7 +219,7 @@ def main():
                 if symbol not in last_alert:
                     should_send = True
                 else:
-                    time_diff = current_time - last_alert[symbol]
+                    time_diff = current_time - last_alert.get(symbol, 0)
                     strength_diff = current_strength - last_strength.get(symbol, 0)
 
                     if current_strength >= cfg["strong_signal_threshold"]:
