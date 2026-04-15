@@ -11,14 +11,10 @@ DEFAULT_CONFIG = {
     "market_cap_max": 900000000,
     "check_interval": 300,
     "alert_cooldown_hours": 6,
-    "min_signal_strength": 3.5,
-    "strong_signal_threshold": 4.2,
+    "min_signal_strength": 3.5,        # كما طلبت
+    "strong_signal_threshold": 4.2,    # يسمح بالتكرار فقط عند 4.2+
     "telegram_token": "8509548153:AAE1nrJeE9u9x9MEQvYr-MvEo7wNE5YfYfE",
-    "chat_id": "873875241",
-    "active_sectors": [
-        "ai", "artificial-intelligence", "gaming", "rwa", "real-world-assets",
-        "defi", "layer-2"
-    ]
+    "chat_id": "873875241"
 }
 
 def load_config():
@@ -35,11 +31,7 @@ def send_telegram(message, cfg):
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
-        requests.post(url, json={
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "HTML"
-        }, timeout=15)
+        requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=15)
     except:
         pass
 
@@ -48,76 +40,47 @@ def get_coins_market():
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/coins/markets",
-            params={
-                "vs_currency": "usd",
-                "order": "volume_desc",
-                "per_page": 500,
-                "page": 1,
-                "price_change_percentage": "24h,7d"
-            },
+            params={"vs_currency": "usd", "order": "volume_desc", "per_page": 500, "page": 1, "price_change_percentage": "24h,7d"},
             timeout=25
         )
         data = r.json()
         print(f"✅ تم جلب {len(data)} عملة بنجاح")
         return data
     except Exception as e:
-        print(f"❌ خطأ في جلب بيانات CoinGecko: {e}")
+        print(f"❌ خطأ في جلب البيانات: {e}")
         return []
 
-# ====================== Altcoin Strength Filter (20%) ======================
-def get_altcoin_strength(coins):
+# ====================== 1. Smart Liquidity Flow (18%) ======================
+def get_smart_liquidity_flow(coin, coins):
     try:
-        filtered = [c for c in coins if c.get("market_cap") and 
-                   DEFAULT_CONFIG["market_cap_min"] <= c.get("market_cap", 0) <= DEFAULT_CONFIG["market_cap_max"]]
+        price = coin.get("current_price", 0)
+        volume = coin.get("total_volume", 0)
+        if price == 0 or volume == 0:
+            return 0.5
 
-        if len(filtered) < 30:
-            return {"strength": 0.5, "status": "Neutral"}
+        avg_vol = sum(c.get("total_volume", 0) for c in coins[:100]) / 100 if coins else volume
+        volume_ratio = volume / avg_vol if avg_vol > 0 else 1.0
 
-        g1 = filtered[0:10]
-        g2 = filtered[10:50]
-        g3 = filtered[50:100]
-        g4 = filtered[100:]
+        # قرب من مناطق السيولة المتوقعة
+        proximity = max(0.3, 1.0 - (price * 0.9 / price))
 
-        def group_score(g):
-            if not g: 
-                return 0.5
-            positive = sum(1 for c in g if c.get("price_change_percentage_24h", 0) > 0)
-            avg_chg = sum(c.get("price_change_percentage_24h", 0) for c in g) / len(g)
-            return (positive / len(g)) * 0.6 + (1 if avg_chg > 2 else 0.7 if avg_chg > 0 else 0.2)
+        score = (volume_ratio * 0.55) + (proximity * 0.45)
+        return round(min(max(score, 0.2), 1.0), 2)
+    except:
+        return 0.55
 
-        s1 = group_score(g1)
-        s2 = group_score(g2)
-        s3 = group_score(g3)
-        s4 = group_score(g4)
-
-        strength = (s1 + s2 + s3 + s4) / 4
-        strength = round(min(max(strength, 0.0), 1.0), 2)
-
-        status = "Strong" if strength >= 0.75 else "Moderate" if strength >= 0.55 else "Neutral" if strength >= 0.40 else "Weak"
-
-        print(f"🌍 Altcoin Strength: {status} | Score: {strength}")
-
-        return {"strength": strength, "status": status}
-
-    except Exception as e:
-        print(f"⚠️ خطأ في Altcoin Strength: {e}")
-        return {"strength": 0.55, "status": "Neutral"}
-
-# ====================== Liquidity Zones (28%) ======================
-def get_liquidity_score(coin):
+# ====================== 2. Liquidity Zones (28%) ======================
+def get_liquidity_zones(coin):
     try:
         price = coin.get("current_price", 0)
         if price == 0:
             return 0.5
-        # تقريبي لأدنى سعر خلال 7 أيام
-        low_7d = price * 0.88  # افتراضي
-        distance = (price - low_7d) / price
-        score = max(0.3, 1.0 - distance * 1.8)
-        return round(score, 2)
+        proximity = max(0.25, 1.0 - (price * 0.88 / price))
+        return round(proximity, 2)
     except:
         return 0.65
 
-# ====================== Volume Confirmation نسبي (20%) ======================
+# ====================== 3. Volume Confirmation نسبي متقدم (22%) ======================
 def get_volume_score(coin, coins):
     try:
         current_vol = coin.get("total_volume", 0)
@@ -127,21 +90,26 @@ def get_volume_score(coin, coins):
         avg_vol = sum(c.get("total_volume", 0) for c in coins[:100]) / 100 if coins else current_vol
         ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
 
-        if ratio >= 4.0:
-            return 0.95
-        elif ratio >= 3.0:
-            return 0.85
-        elif ratio >= 2.0:
-            return 0.70
-        elif ratio >= 1.5:
-            return 0.50
-        else:
-            return 0.30
+        if ratio >= 4.0: return 0.95
+        elif ratio >= 3.0: return 0.85
+        elif ratio >= 2.2: return 0.75
+        elif ratio >= 1.6: return 0.55
+        else: return 0.30
     except:
         return 0.45
 
+# ====================== 4. Sector Momentum (10%) ======================
+def get_sector_score(coin):
+    # مؤقت - يمكن تطويره لاحقاً
+    return 0.75
+
+# ====================== 5. Social & Narrative (7%) ======================
+def get_social_score(coin):
+    # مؤقت - يمكن تطويره لاحقاً
+    return 0.65
+
 # ====================== التحليل الرئيسي ======================
-def analyze_coin(coin, cfg, alt_strength, coins):
+def analyze_coin(coin, cfg, coins):
     symbol = coin.get("symbol", "").upper()
     name = coin.get("name", "")
     price = coin.get("current_price", 0)
@@ -151,22 +119,26 @@ def analyze_coin(coin, cfg, alt_strength, coins):
     if not (cfg["market_cap_min"] <= market_cap <= cfg["market_cap_max"]):
         return None
 
-    liquidity_score = get_liquidity_score(coin)
+    # حساب المؤشرات
+    liquidity_score = get_liquidity_zones(coin)
     volume_score = get_volume_score(coin, coins)
-    sector_score = 0.75
+    smart_liquidity = get_smart_liquidity_flow(coin, coins)
+    sector_score = get_sector_score(coin)
+    social_score = get_social_score(coin)
+    order_flow_score = 0.72   # مؤقت
 
     # التقييم النهائي حسب الأوزان
     final_strength = (
         0.28 * liquidity_score +
-        0.20 * volume_score +
-        0.20 * alt_strength.get("strength", 0.55) +
-        0.15 * 0.75 +      # Order Flow
+        0.22 * volume_score +
+        0.18 * smart_liquidity +
+        0.15 * order_flow_score +
         0.10 * sector_score +
-        0.07 * 0.65        # Social
+        0.07 * social_score
     )
     final_strength = round(final_strength * 5, 1)
 
-    if final_strength < cfg["min_signal_strength"] and final_strength < cfg["strong_signal_threshold"]:
+    if final_strength < cfg["min_signal_strength"]:
         return None
 
     confidence = "High" if final_strength >= 4.4 else "Medium" if final_strength >= 3.9 else "Low"
@@ -179,15 +151,14 @@ def analyze_coin(coin, cfg, alt_strength, coins):
         "strength": final_strength,
         "confidence": confidence,
         "direction": "Long",
-        "expectation": "صعودي (Liquidity Rotation)",
-        "sector": "غير محدد",
-        "reason": f"Alt: {alt_strength.get('status')} | Liq + Vol قوي",
+        "expectation": "صعودي (Smart Liquidity Rotation)",
+        "reason": f"Liquidity + Volume قوي",
         "risk": "متوسطة",
         "timeframe": "12-48 ساعة",
         "entry": f"{price*0.99:.4f} - {price*1.02:.4f}",
-        "stop_loss": f"{price*0.95:.4f}",
-        "tp1": f"{price*1.08:.4f}",
-        "tp2": f"{price*1.15:.4f}"
+        "stop_loss": f"{price*0.94:.4f}",
+        "tp1": f"{price*1.07:.4f}",
+        "tp2": f"{price*1.14:.4f}"
     }
     return signal
 
@@ -210,25 +181,22 @@ TP2: {signal["tp2"]}
 """
     return msg
 
-# ====================== الدورة الرئيسية ======================
+# ====================== الدورة الرئيسية مع قاعدة تكرار ذكية ======================
 def main():
     cfg = load_config()
-    send_telegram("🤖 Liquidity Rotation Scanner v3\n✅ تم تشغيل النسخة الاحترافية", cfg)
-    print("✅ النظام v3 يعمل الآن - النسخة الاحترافية...")
+    send_telegram("🤖 Liquidity Rotation Scanner v3 Professional\n✅ تم تشغيل النظام الاحترافي", cfg)
+    print("✅ النظام v3 Professional يعمل الآن...")
 
-    last_alert = {}
-    last_strength = {}
+    last_alert = {}      # آخر وقت تنبيه
+    last_strength = {}   # آخر قوة للعملة
 
     while True:
         try:
             coins = get_coins_market()
-            alt_strength = get_altcoin_strength(coins)
-
-            print(f"جاري تحليل {len(coins)} عملة...")
 
             alert_count = 0
             for coin in coins:
-                signal = analyze_coin(coin, cfg, alt_strength, coins)
+                signal = analyze_coin(coin, cfg, coins)
                 if not signal:
                     continue
 
@@ -237,13 +205,17 @@ def main():
                 current_time = time.time()
 
                 should_send = False
+
                 if symbol not in last_alert:
                     should_send = True
                 else:
-                    time_diff = current_time - last_alert.get(symbol, 0)
+                    time_diff = current_time - last_alert[symbol]
                     strength_diff = current_strength - last_strength.get(symbol, 0)
 
-                    if current_strength >= cfg["strong_signal_threshold"] or strength_diff >= 0.5 or time_diff >= cfg["alert_cooldown_hours"] * 3600:
+                    # قاعدة التكرار الذكية
+                    if current_strength >= cfg["strong_signal_threshold"] and strength_diff >= 0.25:
+                        should_send = True
+                    elif strength_diff >= 0.4 or time_diff >= cfg["alert_cooldown_hours"] * 3600:
                         should_send = True
 
                 if should_send:
