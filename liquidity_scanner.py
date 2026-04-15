@@ -11,7 +11,7 @@ DEFAULT_CONFIG = {
     "market_cap_max": 900000000,
     "check_interval": 300,
     "alert_cooldown_hours": 6,
-    "min_signal_strength": 3.5,
+    "min_signal_strength": 3.8,
     "strong_signal_threshold": 4.3,
     "active_sectors_weight": 1.5,
     "telegram_token": "8509548153:AAE1nrJeE9u9x9MEQvYr-MvEo7wNE5YfYfE",
@@ -65,33 +65,35 @@ def get_coins_market():
         print(f"❌ خطأ في جلب بيانات CoinGecko: {e}")
         return []
 
-# ====================== Altcoin Strength Filter (الجديد - أوزان متساوية) ======================
-def get_altcoin_strength():
+# ====================== Altcoin Strength Filter (معدل - أوزان متساوية) ======================
+def get_altcoin_strength(coins):
     try:
-        coins = get_coins_market()
-        if not coins:
-            return {"strength": 0.5, "status": "Neutral"}
+        # فلتر العملات حسب الماركت كاب أولاً
+        filtered_coins = [c for c in coins if 
+                         c.get("market_cap") and 
+                         CONFIG_FILE["market_cap_min"] <= c.get("market_cap", 0) <= CONFIG_FILE["market_cap_max"]]
+
+        if len(filtered_coins) < 20:
+            return {"strength": 0.5, "status": "Neutral", "filtered_count": len(filtered_coins)}
 
         # تقسيم المجموعات
-        group1 = coins[1:10]      # Top 10 Altcoins (بعد BTC)
-        group2 = coins[10:50]     # Top 11-50
-        group3 = coins[50:100]    # Top 51-100
-        group4 = coins[100:500]   # Small Caps
+        g1 = filtered_coins[0:10]      # أقوى 10 عملات (بعد BTC)
+        g2 = filtered_coins[10:50]     # 11-50
+        g3 = filtered_coins[50:100]    # 51-100
+        g4 = filtered_coins[100:]      # 101 فما فوق (Small & Mid)
 
         def group_score(group):
             if not group:
                 return 0.5
-            positive_24h = sum(1 for c in group if c.get("price_change_percentage_24h", 0) > 0)
+            positive = sum(1 for c in group if c.get("price_change_percentage_24h", 0) > 0)
             avg_change = sum(c.get("price_change_percentage_24h", 0) for c in group) / len(group)
-            avg_volume = sum(c.get("total_volume", 0) for c in group) / len(group)
-            return (positive_24h / len(group)) * 0.5 + (1 if avg_change > 1 else 0.5 if avg_change > 0 else 0.2)
+            return (positive / len(group)) * 0.6 + (1 if avg_change > 2 else 0.7 if avg_change > 0 else 0.2)
 
-        score1 = group_score(group1)
-        score2 = group_score(group2)
-        score3 = group_score(group3)
-        score4 = group_score(group4)
+        score1 = group_score(g1)
+        score2 = group_score(g2)
+        score3 = group_score(g3)
+        score4 = group_score(g4)
 
-        # متوسط متساوي (25% لكل مجموعة)
         final_strength = (score1 + score2 + score3 + score4) / 4
         final_strength = round(min(max(final_strength, 0.0), 1.0), 2)
 
@@ -104,13 +106,17 @@ def get_altcoin_strength():
         else:
             status = "Weak"
 
-        print(f"🌍 Altcoin Strength: {status} | Score: {final_strength} | Groups: {len(group1)}/{len(group2)}/{len(group3)}/{len(group4)}")
+        print(f"🌍 Altcoin Strength: {status} | Score: {final_strength} | Filtered: {len(filtered_coins)} عملة")
 
-        return {"strength": final_strength, "status": status}
+        return {
+            "strength": final_strength, 
+            "status": status, 
+            "filtered_count": len(filtered_coins)
+        }
 
     except Exception as e:
-        print(f"⚠️ خطأ في حساب Altcoin Strength: {e}")
-        return {"strength": 0.55, "status": "Neutral"}
+        print(f"⚠️ خطأ في Altcoin Strength: {e}")
+        return {"strength": 0.55, "status": "Neutral", "filtered_count": 0}
 
 # ====================== التحليل الرئيسي ======================
 def analyze_coin(coin, cfg, alt_strength):
@@ -176,18 +182,18 @@ TP2: {signal["tp2"]}
 # ====================== الدورة الرئيسية ======================
 def main():
     cfg = load_config()
-    send_telegram("🤖 Liquidity Rotation Scanner v2.6\n✅ تم تشغيل النظام مع Altcoin Strength Filter", cfg)
-    print("✅ النظام v2.6 يعمل الآن مع Altcoin Strength Filter...")
+    send_telegram("🤖 Liquidity Rotation Scanner v2.7\n✅ تم تشغيل النظام مع Altcoin Strength Filter", cfg)
+    print("✅ النظام v2.7 يعمل الآن مع Altcoin Strength Filter...")
 
     last_alert = {}
     last_strength = {}
 
     while True:
         try:
-            alt_strength = get_altcoin_strength()
+            alt_strength = get_altcoin_strength(get_coins_market())
             coins = get_coins_market()
 
-            print(f"جاري تحليل {len(coins)} عملة...")
+            print(f"جاري تحليل {len(coins)} عملة (بعد فلتر الماركت كاب: {alt_strength.get('filtered_count', 0)})")
 
             alert_count = 0
             for coin in coins:
