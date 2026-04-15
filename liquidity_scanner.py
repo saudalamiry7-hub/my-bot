@@ -13,7 +13,7 @@ DEFAULT_CONFIG = {
     "alert_cooldown_hours": 6,
     "min_signal_strength": 3.0,
     "active_sectors_weight": 1.5,
-    "telegram_token": "8678100531:AAF_yz0-sCnmgqX94wIRd3gby5DjGWqZou0",
+    "telegram_token": "8509548153:AAE1nrJeE9u9x9MEQvYr-MvEo7wNE5YfYfE",
     "chat_id": "873875241",
     "active_sectors": [
         "ai", "artificial-intelligence", "gaming", "rwa", "real-world-assets",
