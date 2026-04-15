@@ -11,8 +11,8 @@ DEFAULT_CONFIG = {
     "market_cap_max": 900000000,
     "check_interval": 300,
     "alert_cooldown_hours": 6,
-    "min_signal_strength": 3.9,
-    "strong_signal_threshold": 4.4,
+    "min_signal_strength": 3.5,
+    "strong_signal_threshold": 4.2,
     "telegram_token": "8509548153:AAE1nrJeE9u9x9MEQvYr-MvEo7wNE5YfYfE",
     "chat_id": "873875241",
     "active_sectors": [
