@@ -1,27 +1,8 @@
 “””
-╔══════════════════════════════════════════════════════════════════════════════╗
-║          Liquidity Rotation Scanner v3 Professional                        ║
-║          ملف واحد كامل — جاهز للنسخ والتشغيل مباشرة                      ║
-║                                                                            ║
-║  المصادر: CoinGecko + Binance Public API (مجاني بالكامل)                  ║
-║  الأبعاد: Liquidity | Smart Money | Volume | Order Flow | Sector | Health  ║
-║  التنبيهات: Telegram Bot مع نظام Cooldown ذكي                             ║
-║  المراقبة: Binance WebSocket للعملات عالية الدرجة                         ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-
-طريقة التشغيل:
-python liquidity_scanner_v3.py          ← تشغيل مستمر
-python liquidity_scanner_v3.py –test   ← اختبار الاتصالات فقط
-python liquidity_scanner_v3.py –once   ← دورة واحدة ثم توقف
+Liquidity Rotation Scanner v3 Professional
+CoinGecko + Binance Public API + Telegram Bot
 “””
 
-# ══════════════════════════════════════════════════════════════════════════════
-
-# المكتبات
-
-# ══════════════════════════════════════════════════════════════════════════════
-
-import os
 import sys
 import json
 import time
@@ -32,124 +13,90 @@ import threading
 import traceback
 import statistics
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from dataclasses import dataclass, field
 from collections import defaultdict, deque
 from typing import Optional
 
-import websocket   # pip install websocket-client
+import websocket
 
-# ══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
-# ┌─────────────────────────────────────────────────────────────────────────┐
+# SECTION 1 - CONFIGURATION
 
-# │  SECTION 1 — الإعدادات                                                 │
+# Edit TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID before running
 
-# │  ⬇️  ضع بيانات Telegram هنا قبل التشغيل                               │
-
-# └─────────────────────────────────────────────────────────────────────────┘
-
-# ══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 CONFIG = {
-
-```
-# ══════════════════════════════════════════
-#  🤖 TELEGRAM — ضع بياناتك هنا
-# ══════════════════════════════════════════
-#
-#  كيف تحصل على BOT_TOKEN:
-#    1. افتح Telegram وابحث عن @BotFather
-#    2. اكتب /newbot واتبع الخطوات
-#    3. ستحصل على token بهذا الشكل: 7123456789:AAFxxxxxxxx
-#
-#  كيف تحصل على CHAT_ID:
-#    1. أرسل أي رسالة لبوتك
-#    2. افتح هذا الرابط في المتصفح:
-#       https://api.telegram.org/bot<TOKEN>/getUpdates
-#    3. ابحث عن "chat":{"id": XXXXXXX}
-
+# — TELEGRAM SETTINGS —
+# How to get BOT_TOKEN: Search @BotFather on Telegram -> /newbot
+# How to get CHAT_ID: Send a message to your bot, then open:
+# https://api.telegram.org/bot<TOKEN>/getUpdates -> look for chat.id
 "TELEGRAM_BOT_TOKEN": "8509548153:AAEdsqKFuALjrTEgU8f8wExvm2fIf1Y9dig",
 "TELEGRAM_CHAT_ID":   "873875241",
 
-# ══════════════════════════════════════════
-#  📡 مصادر البيانات (لا تعدّل هذا القسم)
-# ══════════════════════════════════════════
+```
+# --- DATA SOURCES ---
 "COINGECKO_BASE":    "https://api.coingecko.com/api/v3",
 "BINANCE_REST_BASE": "https://api.binance.com",
 "BINANCE_FAPI_BASE": "https://fapi.binance.com",
 "BINANCE_WS_BASE":   "wss://stream.binance.com:9443",
 
-# ══════════════════════════════════════════
-#  🔍 نطاق الفحص
-# ══════════════════════════════════════════
+# --- SCAN SETTINGS ---
 "TOP_N_COINS":       500,
-"SCAN_INTERVAL_SEC": 1500,    # 25 دقيقة
+"SCAN_INTERVAL_SEC": 1500,  # 25 minutes
 
-# ══════════════════════════════════════════
-#  💰 فلاتر الماركت كاب
-# ══════════════════════════════════════════
-"MC_MID_MIN":          80_000_000,    # 80M  الهدف الرئيسي
-"MC_MID_MAX":        1_000_000_000,   # 1B
-"MC_SMALL_MIN":        20_000_000,    # 20M  فلتر ثانوي
+# --- MARKET CAP FILTERS (USD) ---
+"MC_MID_MIN":          80_000_000,
+"MC_MID_MAX":        1_000_000_000,
+"MC_SMALL_MIN":        20_000_000,
 "MC_SMALL_MAX":        79_999_999,
-"SMALL_CAP_MIN_SCORE": 3.9,           # درجة أدنى لـ Small Cap
+"SMALL_CAP_MIN_SCORE": 3.9,
 
-# ══════════════════════════════════════════
-#  🎯 عتبات التنبيه
-# ══════════════════════════════════════════
-"ALERT_MIN":    3.5,    # أدنى درجة لإرسال تنبيه
-"ALERT_STRONG": 4.0,    # إشارة قوية 🟠
-"ALERT_ULTRA":  4.5,    # إشارة استثنائية 🔴
+# --- ALERT THRESHOLDS ---
+"ALERT_MIN":    3.5,
+"ALERT_STRONG": 4.0,
+"ALERT_ULTRA":  4.5,
 
-# ══════════════════════════════════════════
-#  ⏱️ نظام التبريد (Cooldown)
-# ══════════════════════════════════════════
-"COOLDOWN_MODERATE_MIN": 45,   # دقيقة — للإشارات 3.5-3.9
-"COOLDOWN_STRONG_MIN":   20,   # دقيقة — للإشارات 4.0-4.4
-"COOLDOWN_ULTRA_MIN":    10,   # دقيقة — للإشارات 4.5+
-"SCORE_JUMP_OVERRIDE":   0.3,  # ارتفع التقييم بهذا المقدار → تنبيه فوري
+# --- COOLDOWN (minutes) ---
+"COOLDOWN_MODERATE_MIN": 45,
+"COOLDOWN_STRONG_MIN":   20,
+"COOLDOWN_ULTRA_MIN":    10,
+"SCORE_JUMP_OVERRIDE":   0.3,
 
-# ══════════════════════════════════════════
-#  📊 WebSocket
-# ══════════════════════════════════════════
-"WS_WATCH_MIN_SCORE":   3.0,   # عملات ≥ 3.0 تُراقَب لحظياً
-"WS_PRICE_SPIKE_PCT":   3.0,   # تحرك % يستدعي تنبيهاً
-"WS_VOLUME_SPIKE_MULT": 3.0,   # حجم × X عن المعتاد = spike
-"WS_MAX_SYMBOLS":       50,    # أقصى عملات في WebSocket
+# --- WEBSOCKET ---
+"WS_WATCH_MIN_SCORE":   3.0,
+"WS_PRICE_SPIKE_PCT":   3.0,
+"WS_VOLUME_SPIKE_MULT": 3.0,
+"WS_MAX_SYMBOLS":       50,
 
-# ══════════════════════════════════════════
-#  🔄 Rate Limiting (لا تعدّل)
-# ══════════════════════════════════════════
-"BINANCE_REQUEST_DELAY":   0.12,   # ثانية بين طلبات Binance
-"COINGECKO_REQUEST_DELAY": 2.0,    # ثانية بين طلبات CoinGecko
+# --- RATE LIMITING ---
+"BINANCE_REQUEST_DELAY":   0.12,
+"COINGECKO_REQUEST_DELAY": 2.0,
 "MAX_RETRIES":             4,
 "RETRY_BASE_DELAY":        3,
 
-# ══════════════════════════════════════════
-#  📈 إعدادات التحليل
-# ══════════════════════════════════════════
-"KLINES_DAYS":      30,    # أيام Klines
-"ORDER_BOOK_DEPTH": 20,    # عمق Order Book
+# --- ANALYSIS ---
+"KLINES_DAYS":      30,
+"ORDER_BOOK_DEPTH": 20,
 
-# ══════════════════════════════════════════
-#  🗂️ السجلات
-# ══════════════════════════════════════════
+# --- LOGGING ---
 "LOG_FILE":  "scanner.log",
 "LOG_LEVEL": "INFO",
 ```
 
 }
 
-# ══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
-# إعداد السجلات
+# LOGGING SETUP
 
-# ══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 logging.basicConfig(
 level=getattr(logging, CONFIG[“LOG_LEVEL”], logging.INFO),
-format=”%(asctime)s [%(levelname)s] %(name)s — %(message)s”,
+format=”%(asctime)s [%(levelname)s] %(name)s - %(message)s”,
 handlers=[
 logging.FileHandler(CONFIG[“LOG_FILE”], encoding=“utf-8”),
 logging.StreamHandler(sys.stdout),
@@ -157,28 +104,18 @@ logging.StreamHandler(sys.stdout),
 )
 log = logging.getLogger(“LRS”)
 
-# ══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
-# ┌─────────────────────────────────────────────────────────────────────────┐
+# SECTION 2 - DATA MODELS
 
-# │  SECTION 2 — هياكل البيانات (Models)                                   │
-
-# └─────────────────────────────────────────────────────────────────────────┘
-
-# ══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 @dataclass
 class CoinData:
-“”“البيانات الكاملة لكل عملة بعد الجمع من CoinGecko + Binance”””
-
-```
-# تعريف
 id:     str
 symbol: str
 name:   str
 rank:   int
-
-# بيانات السوق (CoinGecko)
 price:            float
 market_cap:       float
 volume_24h:       float
@@ -187,49 +124,36 @@ price_change_24h: float
 price_change_7d:  float
 ath:              float
 atl:              float
-
-# بيانات Binance OHLCV
 volume_7d_avg:      float = 0.0
 volume_30d_avg:     float = 0.0
 volume_spike_ratio: float = 0.0
 price_volatility:   float = 0.0
-
-# بيانات Order Book
 bid_ask_ratio:  float = 0.0
 book_imbalance: float = 0.0
 buy_wall_usd:   float = 0.0
 sell_wall_usd:  float = 0.0
-
-# بيانات Futures
 funding_rate:       float = 0.0
 funding_rate_avg7d: float = 0.0
 open_interest:      float = 0.0
 oi_change_24h:      float = 0.0
-
-# بيانات On-Chain / Community
 dev_score:           float = 0.0
 community_score:     float = 0.0
 commit_acceleration: float = 0.0
-
-# تصنيف وجودة
-sector:              str  = "Other"
+sector:              str  = “Other”
 has_binance_spot:    bool = False
 has_binance_futures: bool = False
-binance_symbol:      str  = ""
-```
+binance_symbol:      str  = “”
 
 @dataclass
 class DimensionScore:
-“”“نتيجة بُعد تحليلي واحد”””
 name:       str
-score:      float          # 0.0 → 1.0
+score:      float
 weight:     float
 signals:    list = field(default_factory=list)
 sub_scores: dict = field(default_factory=dict)
 
 @dataclass
 class CoinAnalysis:
-“”“التحليل الكامل لعملة”””
 coin:           CoinData
 dimensions:     list
 final_score:    float
@@ -245,29 +169,29 @@ timestamp:      datetime = field(default_factory=datetime.utcnow)
 ```
 def score_label(self) -> str:
     s = self.final_score
-    if s >= 4.5: return "🔴 ULTRA"
-    if s >= 4.0: return "🟠 STRONG"
-    if s >= 3.5: return "🟡 MODERATE"
-    return "⚪ WATCH"
+    if s >= 4.5: return "ULTRA"
+    if s >= 4.0: return "STRONG"
+    if s >= 3.5: return "MODERATE"
+    return "WATCH"
+
+def score_emoji(self) -> str:
+    s = self.final_score
+    if s >= 4.5: return "[ULTRA]"
+    if s >= 4.0: return "[STRONG]"
+    if s >= 3.5: return "[MODERATE]"
+    return "[WATCH]"
 ```
 
-# ══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
-# ┌─────────────────────────────────────────────────────────────────────────┐
+# SECTION 3 - DATA FETCHER
 
-# │  SECTION 3 — جلب البيانات (Data Fetcher)                               │
-
-# └─────────────────────────────────────────────────────────────────────────┘
-
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ── تصنيف القطاعات ──────────────────────────────────────────────────────────
+# =============================================================================
 
 SECTOR_MAP = {
 “AI”:      [“ai”, “artificial”, “intelligence”, “neural”, “fetch”, “ocean”,
 “singularity”, “render”, “akash”, “gpt”, “agi”, “bittensor”],
-“RWA”:     [“rwa”, “ondo”, “centrifuge”, “maple”, “goldfinch”, “creditcoin”,
-“landx”, “backed”],
+“RWA”:     [“rwa”, “ondo”, “centrifuge”, “maple”, “goldfinch”, “creditcoin”],
 “DeFi”:    [“defi”, “swap”, “finance”, “yield”, “liquidity”, “protocol”,
 “curve”, “aave”, “compound”, “uniswap”, “dydx”, “gmx”, “pendle”],
 “Gaming”:  [“game”, “gaming”, “play”, “metaverse”, “nft”, “axie”, “sandbox”,
@@ -279,22 +203,19 @@ SECTOR_MAP = {
 “Layer2”:  [“optimism”, “arbitrum”, “polygon”, “zk”, “rollup”, “blast”,
 “base”, “scroll”, “starknet”, “linea”],
 “Oracle”:  [“oracle”, “chainlink”, “band”, “api3”, “uma”, “tellor”, “pyth”],
-“Liquid Staking”: [“lido”, “rocket”, “frax”, “ankr”, “eigen”, “restaking”],
+“LiquidStaking”: [“lido”, “rocket”, “frax”, “ankr”, “eigen”, “restaking”],
 “Storage”: [“filecoin”, “arweave”, “sia”, “storj”],
 }
 
 def classify_sector(coin_id: str, symbol: str, name: str) -> str:
-text = f”{coin_id} {symbol} {name}”.lower()
+text = (coin_id + “ “ + symbol + “ “ + name).lower()
 for sector, keywords in SECTOR_MAP.items():
 if any(kw in text for kw in keywords):
 return sector
 return “Other”
 
-# ── HTTP Helper ──────────────────────────────────────────────────────────────
-
 def _http_get(url: str, params: dict = None, delay: float = 0.0,
 source: str = “API”) -> Optional[dict | list]:
-“”“GET مع Retry وExponential Backoff”””
 if delay > 0:
 time.sleep(delay)
 for attempt in range(CONFIG[“MAX_RETRIES”]):
@@ -303,7 +224,7 @@ r = requests.get(url, params=params,
 headers={“accept”: “application/json”}, timeout=15)
 if r.status_code == 429:
 wait = CONFIG[“RETRY_BASE_DELAY”] * (2 ** attempt) + 5
-log.warning(f”[{source}] Rate limit → انتظار {wait:.0f}s”)
+log.warning(”[%s] Rate limit -> waiting %ds”, source, wait)
 time.sleep(wait)
 continue
 if r.status_code == 404:
@@ -311,14 +232,12 @@ return None
 r.raise_for_status()
 return r.json()
 except requests.Timeout:
-log.warning(f”[{source}] Timeout (attempt {attempt+1})”)
+log.warning(”[%s] Timeout (attempt %d)”, source, attempt + 1)
 except requests.RequestException as e:
-log.warning(f”[{source}] Error (attempt {attempt+1}): {e}”)
+log.warning(”[%s] Error (attempt %d): %s”, source, attempt + 1, e)
 time.sleep(CONFIG[“RETRY_BASE_DELAY”] * (2 ** attempt))
-log.error(f”[{source}] فشل بعد {CONFIG[‘MAX_RETRIES’]} محاولات”)
+log.error(”[%s] Failed after %d retries”, source, CONFIG[“MAX_RETRIES”])
 return None
-
-# ── CoinGecko ────────────────────────────────────────────────────────────────
 
 class CoinGeckoFetcher:
 
@@ -326,12 +245,14 @@ class CoinGeckoFetcher:
 BASE  = CONFIG["COINGECKO_BASE"]
 DELAY = CONFIG["COINGECKO_REQUEST_DELAY"]
 
-def fetch_markets_page(self, page: int, per_page: int = 250) -> list[dict]:
+def fetch_markets_page(self, page: int, per_page: int = 250) -> list:
     data = _http_get(
-        f"{self.BASE}/coins/markets",
+        self.BASE + "/coins/markets",
         params={
-            "vs_currency": "usd", "order": "market_cap_desc",
-            "per_page": per_page, "page": page,
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": per_page,
+            "page": page,
             "sparkline": "false",
             "price_change_percentage": "1h,24h,7d",
         },
@@ -340,27 +261,14 @@ def fetch_markets_page(self, page: int, per_page: int = 250) -> list[dict]:
     )
     return data or []
 
-def fetch_top500(self) -> list[dict]:
-    log.info("📡 [CoinGecko] جلب أول 500 عملة...")
+def fetch_top500(self) -> list:
+    log.info("[CoinGecko] Fetching top 500 coins...")
     p1 = self.fetch_markets_page(1, 250)
     p2 = self.fetch_markets_page(2, 250)
     result = p1 + p2
-    log.info(f"✅ [CoinGecko] جُلب {len(result)} عملة")
+    log.info("[CoinGecko] Fetched %d coins", len(result))
     return result
-
-def fetch_coin_detail(self, coin_id: str) -> Optional[dict]:
-    return _http_get(
-        f"{self.BASE}/coins/{coin_id}",
-        params={
-            "localization": "false", "tickers": "false",
-            "market_data": "false", "community_data": "true",
-            "developer_data": "true", "sparkline": "false",
-        },
-        delay=self.DELAY, source="CoinGecko-Detail"
-    )
 ```
-
-# ── Binance REST ─────────────────────────────────────────────────────────────
 
 class BinanceFetcher:
 
@@ -369,7 +277,6 @@ SPOT  = CONFIG["BINANCE_REST_BASE"]
 FAPI  = CONFIG["BINANCE_FAPI_BASE"]
 DELAY = CONFIG["BINANCE_REQUEST_DELAY"]
 
-# رموز خاصة لا تتبع النمط العادي
 SYMBOL_OVERRIDES = {
     "bitcoin": "BTCUSDT", "ethereum": "ETHUSDT", "binancecoin": "BNBUSDT",
     "ripple": "XRPUSDT", "solana": "SOLUSDT", "dogecoin": "DOGEUSDT",
@@ -385,49 +292,45 @@ SYMBOL_OVERRIDES = {
 }
 
 def spot_symbol(self, coin_id: str, symbol: str) -> str:
-    return self.SYMBOL_OVERRIDES.get(coin_id, f"{symbol.upper()}USDT")
+    return self.SYMBOL_OVERRIDES.get(coin_id, symbol.upper() + "USDT")
 
-def fetch_klines(self, symbol: str, interval: str = "1d",
-                 limit: int = 30) -> list:
+def fetch_klines(self, symbol: str, interval: str = "1d", limit: int = 30) -> list:
     return _http_get(
-        f"{self.SPOT}/api/v3/klines",
+        self.SPOT + "/api/v3/klines",
         params={"symbol": symbol, "interval": interval, "limit": limit},
         delay=self.DELAY, source="Binance-Klines"
     ) or []
 
 def fetch_order_book(self, symbol: str) -> Optional[dict]:
     return _http_get(
-        f"{self.SPOT}/api/v3/depth",
+        self.SPOT + "/api/v3/depth",
         params={"symbol": symbol, "limit": CONFIG["ORDER_BOOK_DEPTH"]},
         delay=self.DELAY, source="Binance-OrderBook"
     )
 
 def fetch_funding_history(self, symbol: str, limit: int = 56) -> list:
     return _http_get(
-        f"{self.FAPI}/fapi/v1/fundingRate",
+        self.FAPI + "/fapi/v1/fundingRate",
         params={"symbol": symbol, "limit": limit},
         delay=self.DELAY, source="Binance-Funding"
     ) or []
 
 def fetch_open_interest(self, symbol: str) -> Optional[dict]:
     return _http_get(
-        f"{self.FAPI}/fapi/v1/openInterest",
+        self.FAPI + "/fapi/v1/openInterest",
         params={"symbol": symbol},
         delay=self.DELAY, source="Binance-OI"
     )
 
 def fetch_oi_history(self, symbol: str) -> list:
     return _http_get(
-        f"{self.FAPI}/futures/data/openInterestHist",
+        self.FAPI + "/futures/data/openInterestHist",
         params={"symbol": symbol, "period": "1d", "limit": 30},
         delay=self.DELAY, source="Binance-OI-History"
     ) or []
 ```
 
-# ── Data Enricher ─────────────────────────────────────────────────────────────
-
 class DataEnricher:
-“”“يجمع CoinGecko + Binance في CoinData واحد”””
 
 ```
 def __init__(self):
@@ -441,21 +344,19 @@ def _volume_stats(self, klines: list) -> dict:
     closes  = [float(k[4]) for k in klines]
     returns = [(closes[i] - closes[i-1]) / closes[i-1]
                for i in range(1, len(closes)) if closes[i-1] > 0]
-
     vol_7d    = statistics.mean(volumes[-7:])  if len(volumes) >= 7  else 0
     vol_30d   = statistics.mean(volumes[-30:]) if len(volumes) >= 30 else statistics.mean(volumes)
     vol_today = volumes[-1] if volumes else 0
     spike     = vol_today / vol_30d if vol_30d > 0 else 1.0
     volatility = statistics.stdev(returns) if len(returns) >= 2 else 0.0
-
     return {"volume_7d_avg": vol_7d, "volume_30d_avg": vol_30d,
             "volume_spike_ratio": spike, "price_volatility": volatility}
 
 def _book_stats(self, book: dict) -> dict:
     if not book:
         return {}
-    bids = [(float(p), float(q)) for p, q in book.get("bids", [])]
-    asks = [(float(p), float(q)) for p, q in book.get("asks", [])]
+    bids    = [(float(p), float(q)) for p, q in book.get("bids", [])]
+    asks    = [(float(p), float(q)) for p, q in book.get("asks", [])]
     total_b = sum(p * q for p, q in bids)
     total_a = sum(p * q for p, q in asks)
     total   = total_b + total_a
@@ -480,8 +381,8 @@ def _oi_stats(self, oi_now: Optional[dict], oi_hist: list) -> dict:
     oi_current = float(oi_now.get("openInterest", 0))
     oi_change  = 0.0
     if len(oi_hist) >= 2:
-        vals    = [float(h.get("sumOpenInterest", 0)) for h in oi_hist]
-        oi_old  = vals[-2]
+        vals   = [float(h.get("sumOpenInterest", 0)) for h in oi_hist]
+        oi_old = vals[-2]
         if oi_old > 0:
             oi_change = (vals[-1] - oi_old) / oi_old * 100
     return {"open_interest": oi_current, "oi_change_24h": oi_change}
@@ -491,7 +392,6 @@ def _dev_community(self, detail: Optional[dict]) -> dict:
         return {}
     dev  = detail.get("developer_data", {}) or {}
     comm = detail.get("community_data",  {}) or {}
-
     c4           = dev.get("commit_count_4_weeks", 0) or 0
     commit_accel = min(1.0, c4 / 50) if c4 > 0 else 0.0
     pull_req     = dev.get("pull_request_contributors", 0) or 0
@@ -499,17 +399,14 @@ def _dev_community(self, detail: Optional[dict]) -> dict:
     forks        = dev.get("forks", 0) or 0
     dev_score    = min(100, commit_accel * 40 + min(40, pull_req * 0.5)
                       + min(20, (stars + forks) / 1000))
-
     def log_norm(x, cap=1_000_000):
         return min(1.0, math.log10(max(x, 1)) / math.log10(cap))
-
     twitter  = comm.get("twitter_followers", 0) or 0
     reddit   = comm.get("reddit_subscribers", 0) or 0
     telegram = comm.get("telegram_channel_user_count", 0) or 0
     comm_score = min(100, (log_norm(twitter, 5_000_000) * 40
                            + log_norm(reddit, 500_000)   * 30
                            + log_norm(telegram, 200_000) * 30) * 100)
-
     return {"dev_score": dev_score, "community_score": comm_score,
             "commit_acceleration": commit_accel}
 
@@ -517,7 +414,6 @@ def enrich(self, raw: dict) -> CoinData:
     coin_id = raw.get("id", "")
     symbol  = raw.get("symbol", "").upper()
     name    = raw.get("name", "")
-
     coin = CoinData(
         id=coin_id, symbol=symbol, name=name,
         rank=raw.get("market_cap_rank", 999) or 999,
@@ -531,11 +427,8 @@ def enrich(self, raw: dict) -> CoinData:
         atl=float(raw.get("atl") or 1e-10),
         sector=classify_sector(coin_id, symbol, name),
     )
-
     bn_sym = self.bn.spot_symbol(coin_id, symbol)
     coin.binance_symbol = bn_sym
-
-    # Klines
     klines = self.bn.fetch_klines(bn_sym, "1d", CONFIG["KLINES_DAYS"])
     if klines:
         coin.has_binance_spot = True
@@ -544,8 +437,6 @@ def enrich(self, raw: dict) -> CoinData:
         coin.volume_30d_avg     = s.get("volume_30d_avg", 0)
         coin.volume_spike_ratio = s.get("volume_spike_ratio", 1.0)
         coin.price_volatility   = s.get("price_volatility", 0)
-
-    # Order Book
     book = self.bn.fetch_order_book(bn_sym)
     if book:
         s = self._book_stats(book)
@@ -553,59 +444,49 @@ def enrich(self, raw: dict) -> CoinData:
         coin.book_imbalance = s.get("book_imbalance", 0.0)
         coin.buy_wall_usd   = s.get("buy_wall_usd", 0.0)
         coin.sell_wall_usd  = s.get("sell_wall_usd", 0.0)
-
-    # Futures
     funding = self.bn.fetch_funding_history(bn_sym)
     if funding:
         coin.has_binance_futures = True
         s = self._funding_stats(funding)
         coin.funding_rate       = s.get("funding_rate", 0)
         coin.funding_rate_avg7d = s.get("funding_rate_avg7d", 0)
-
     oi_now  = self.bn.fetch_open_interest(bn_sym)
     oi_hist = self.bn.fetch_oi_history(bn_sym)
     if oi_now:
         s = self._oi_stats(oi_now, oi_hist)
         coin.open_interest = s.get("open_interest", 0)
         coin.oi_change_24h = s.get("oi_change_24h", 0)
-
     return coin
 
-def build_list(self, raw_list: list) -> list[CoinData]:
+def build_list(self, raw_list: list) -> list:
     total  = len(raw_list)
     result = []
     for i, raw in enumerate(raw_list, 1):
         try:
             result.append(self.enrich(raw))
             if i % 10 == 0:
-                log.info(f"  ↳ إثراء البيانات: {i}/{total}")
+                log.info("  Enriching: %d/%d", i, total)
         except Exception as e:
-            log.warning(f"خطأ في إثراء {raw.get('symbol','?')}: {e}")
-    log.info(f"✅ اكتمل إثراء {len(result)} عملة")
+            log.warning("Error enriching %s: %s", raw.get("symbol", "?"), e)
+    log.info("Enrichment complete: %d coins", len(result))
     return result
 ```
 
-# ══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
-# ┌─────────────────────────────────────────────────────────────────────────┐
+# SECTION 4 - SCANNER ENGINE (6 DIMENSIONS)
 
-# │  SECTION 4 — محرك التقييم (Scanner — 6 أبعاد)                         │
-
-# └─────────────────────────────────────────────────────────────────────────┘
-
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ── Sector Tracker ────────────────────────────────────────────────────────────
+# =============================================================================
 
 class SectorMomentumTracker:
 
 ```
 def __init__(self):
-    self._changes: dict[str, list[float]] = defaultdict(list)
-    self._volumes: dict[str, list[float]] = defaultdict(list)
+    self._changes: dict = defaultdict(list)
+    self._volumes: dict = defaultdict(list)
     self._market_avg = 0.0
 
-def update(self, coins: list[CoinData]):
+def update(self, coins: list):
     self._changes.clear()
     self._volumes.clear()
     all_ch = []
@@ -640,60 +521,47 @@ def volume_surge(self, sector: str, coin_volume: float) -> float:
 
 SECTOR_TRACKER = SectorMomentumTracker()
 
-# ── البُعد 1: Liquidity Zones & Heatmap (20%) ────────────────────────────────
-
 class D1_LiquidityZones:
 WEIGHT = 0.20
 
 ```
 def score(self, c: CoinData) -> DimensionScore:
     signals, sub = [], {}
-
-    # Order Block Zone
     s1 = 0.0
     if c.ath > 0 and c.price > 0:
         d = (c.ath - c.price) / c.ath
-        if   0.50 <= d <= 0.80: s1 = max(0.0, 1.0 - abs(d - 0.65) * 3); signals.append(f"OB Zone ✓ ({d*100:.0f}% below ATH)")
-        elif 0.80 <  d <= 0.95: s1 = 0.70; signals.append(f"Deep Value ({d*100:.0f}% below ATH)")
+        if   0.50 <= d <= 0.80: s1 = max(0.0, 1.0 - abs(d - 0.65) * 3); signals.append("OB Zone (%.0f%% below ATH)" % (d*100))
+        elif 0.80 <  d <= 0.95: s1 = 0.70; signals.append("Deep Value (%.0f%% below ATH)" % (d*100))
         elif 0.20 <= d <  0.50: s1 = 0.40
-        elif d < 0.10:          s1 = 0.15; signals.append("Near ATH — resistance risk")
+        elif d < 0.10:          s1 = 0.15; signals.append("Near ATH - resistance risk")
     sub["order_block"] = round(s1, 3)
-
-    # Fair Value Gap
     s2 = 0.0
     if c.price_change_24h != 0:
         ratio = abs(c.price_change_1h) / (abs(c.price_change_24h) + 0.01)
         if ratio > 0.25:
             s2 = min(1.0, ratio * 1.5)
-            signals.append(f"FVG Signal (1h={c.price_change_1h:+.1f}% / 24h={c.price_change_24h:+.1f}%)")
+            signals.append("FVG Signal (1h=%.1f%% / 24h=%.1f%%)" % (c.price_change_1h, c.price_change_24h))
         if c.price_change_7d < -10 and c.price_change_1h > 1.0:
             s2 = max(s2, 0.65)
-            signals.append(f"FVG Bounce (7d={c.price_change_7d:.1f}%)")
+            signals.append("FVG Bounce (7d=%.1f%%)" % c.price_change_7d)
     sub["fvg"] = round(s2, 3)
-
-    # Short Squeeze Zone
     s3 = 0.0
     if c.price_change_7d <= -20:
         s3 = 0.50 + min(0.50, abs(c.price_change_7d + 20) / 30)
-        signals.append(f"Short Squeeze Candidate ({c.price_change_7d:.1f}% 7d)")
+        signals.append("Short Squeeze Candidate (%.1f%% 7d)" % c.price_change_7d)
     elif -20 < c.price_change_7d <= -10:
         s3 = 0.35
     sub["squeeze_zone"] = round(s3, 3)
-
-    # ATL Accumulation Zone
     s4 = 0.0
     if c.atl > 0 and c.price > 0:
         mult = c.price / c.atl
-        if   2.0 <= mult <= 5.0: s4 = 0.70; signals.append(f"Accumulation Zone ({mult:.1f}x above ATL)")
-        elif 1.05 <= mult < 2.0: s4 = 0.85; signals.append("Near ATL — Squeeze risk/reward")
+        if   2.0 <= mult <= 5.0: s4 = 0.70; signals.append("Accumulation Zone (%.1fx above ATL)" % mult)
+        elif 1.05 <= mult < 2.0: s4 = 0.85; signals.append("Near ATL - Squeeze risk/reward")
         elif mult > 10:          s4 = 0.30
     sub["atl_zone"] = round(s4, 3)
-
     final = round(min(1.0, s1*0.35 + s2*0.25 + s3*0.25 + s4*0.15), 4)
-    return DimensionScore("Liquidity Zones & Heatmap", final, self.WEIGHT, signals, sub)
+    return DimensionScore("Liquidity Zones", final, self.WEIGHT, signals, sub)
 ```
-
-# ── البُعد 2: Smart Money / Order Flow (20%) ─────────────────────────────────
 
 class D2_SmartMoney:
 WEIGHT = 0.20
@@ -701,53 +569,42 @@ WEIGHT = 0.20
 ```
 def score(self, c: CoinData) -> DimensionScore:
     signals, sub = [], {}
-
-    # Order Book Imbalance
     s1 = 0.0
     if c.has_binance_spot and c.book_imbalance != 0:
         imb = c.book_imbalance
-        if   imb > 0.15:  s1 = min(1.0, 0.60 + imb * 1.5); signals.append(f"Buy Pressure: {imb:+.2f}")
-        elif imb > 0.05:  s1 = 0.55
+        if   imb > 0.15:   s1 = min(1.0, 0.60 + imb * 1.5); signals.append("Buy Pressure: %.2f" % imb)
+        elif imb > 0.05:   s1 = 0.55
         elif imb >= -0.05: s1 = 0.40
-        else:              s1 = max(0.0, 0.30 + imb); signals.append(f"Sell Pressure: {imb:+.2f}")
+        else:              s1 = max(0.0, 0.30 + imb); signals.append("Sell Pressure: %.2f" % imb)
     else:
         s1 = min(0.60, c.volume_24h / max(c.market_cap, 1) * 2)
     sub["book_imbalance"] = round(s1, 3)
-
-    # Absorption Signal
     s2 = 0.0
     if c.price_change_24h < -5 and c.volume_spike_ratio > 1.5:
         s2 = min(1.0, (abs(c.price_change_24h) / 15) * (c.volume_spike_ratio / 3))
-        signals.append(f"Absorption ✓ ({c.price_change_24h:.1f}% / {c.volume_spike_ratio:.1f}x vol)")
+        signals.append("Absorption (%.1f%% / %.1fx vol)" % (c.price_change_24h, c.volume_spike_ratio))
     elif c.price_change_24h > 5 and c.volume_spike_ratio > 2.0:
         s2 = min(1.0, 0.50 + (c.volume_spike_ratio - 2) * 0.15)
-        signals.append(f"Volume Breakout ✓ ({c.volume_spike_ratio:.1f}x)")
+        signals.append("Volume Breakout (%.1fx)" % c.volume_spike_ratio)
     sub["absorption"] = round(s2, 3)
-
-    # Funding Rate Divergence
     s3 = 0.35
     if c.has_binance_futures:
         dev = c.funding_rate - c.funding_rate_avg7d
-        if   dev < -0.03: s3 = min(1.0, abs(dev) * 20); signals.append(f"Negative Funding Divergence ({dev:+.4f}%)")
-        elif dev >  0.05: s3 = 0.25; signals.append(f"High Positive Funding ({dev:+.4f}%) — caution")
+        if   dev < -0.03: s3 = min(1.0, abs(dev) * 20); signals.append("Negative Funding Divergence (%.4f%%)" % dev)
+        elif dev >  0.05: s3 = 0.25; signals.append("High Positive Funding - caution")
         else:              s3 = 0.40
     sub["funding_divergence"] = round(s3, 3)
-
-    # OI Change
     s4 = 0.35
     if c.has_binance_futures and c.open_interest > 0:
         oi = c.oi_change_24h
-        if   5 <= oi <= 30: s4 = min(1.0, oi / 30); signals.append(f"OI Inflow +{oi:.1f}%")
-        elif oi > 30:        s4 = 0.50; signals.append(f"OI Spike {oi:.1f}% — speculative")
-        elif oi < -10:       s4 = 0.20; signals.append(f"OI Outflow {oi:.1f}%")
+        if   5 <= oi <= 30: s4 = min(1.0, oi / 30); signals.append("OI Inflow +%.1f%%" % oi)
+        elif oi > 30:        s4 = 0.50; signals.append("OI Spike %.1f%% - speculative" % oi)
+        elif oi < -10:       s4 = 0.20; signals.append("OI Outflow %.1f%%" % oi)
         else:                s4 = 0.35
     sub["oi_change"] = round(s4, 3)
-
     final = round(min(1.0, s1*0.30 + s2*0.30 + s3*0.25 + s4*0.15), 4)
-    return DimensionScore("Smart Money / Order Flow", final, self.WEIGHT, signals, sub)
+    return DimensionScore("Smart Money", final, self.WEIGHT, signals, sub)
 ```
-
-# ── البُعد 3: Volume Confirmation (25%) ──────────────────────────────────────
 
 class D3_VolumeConfirmation:
 WEIGHT = 0.25
@@ -755,52 +612,41 @@ WEIGHT = 0.25
 ```
 def score(self, c: CoinData) -> DimensionScore:
     signals, sub = [], {}
-
-    # Volume Spike vs 7d & 30d
     s1 = 0.0
     if c.volume_30d_avg > 0:
         sp30 = c.volume_24h / c.volume_30d_avg
         sp7  = c.volume_24h / c.volume_7d_avg if c.volume_7d_avg > 0 else 1.0
-        if   2.0 <= sp30 <= 6.0: s1 = 0.60 + min(0.40, (sp30 - 2) / 4 * 0.40); signals.append(f"Vol Spike ✓ {sp30:.1f}x (30d avg)")
+        if   2.0 <= sp30 <= 6.0: s1 = 0.60 + min(0.40, (sp30 - 2) / 4 * 0.40); signals.append("Vol Spike %.1fx (30d avg)" % sp30)
         elif 1.5 <= sp30 < 2.0:  s1 = 0.50
-        elif sp30 > 6.0:         s1 = 0.45; signals.append(f"Extreme Vol {sp30:.1f}x — caution")
+        elif sp30 > 6.0:         s1 = 0.45; signals.append("Extreme Vol %.1fx - caution" % sp30)
         else:                    s1 = max(0.0, sp30 * 0.20)
         if sp7 > 1.8 and sp30 > 1.8:
             s1 = min(1.0, s1 + 0.10)
-            signals.append(f"Vol Consistency ✓ (7d={sp7:.1f}x / 30d={sp30:.1f}x)")
+            signals.append("Vol Consistency (7d=%.1fx / 30d=%.1fx)" % (sp7, sp30))
     else:
         s1 = min(0.55, c.volume_24h / max(c.market_cap, 1) * 1.5)
     sub["volume_spike"] = round(s1, 3)
-
-    # VCP Pattern
     s2 = 0.0
     if c.price_volatility > 0:
         if   c.price_volatility < 0.03 and c.volume_spike_ratio > 2.0:
             s2 = min(1.0, (2 - c.price_volatility * 30) * (c.volume_spike_ratio / 4))
-            signals.append(f"VCP Pattern ✓ (vol={c.price_volatility*100:.1f}% / spike={c.volume_spike_ratio:.1f}x)")
+            signals.append("VCP Pattern (vol=%.1f%% / spike=%.1fx)" % (c.price_volatility*100, c.volume_spike_ratio))
         elif 0.03 <= c.price_volatility <= 0.06: s2 = 0.45
         else: s2 = max(0.0, 0.30 - (c.price_volatility - 0.06) * 2)
     sub["vcp"] = round(s2, 3)
-
-    # Volume/Price Confirmation
     s3 = 0.35
     if   c.price_change_24h > 3 and c.volume_spike_ratio > 1.5:
-        s3 = min(1.0, (c.price_change_24h / 15) * (c.volume_spike_ratio / 3))
-        signals.append("Vol/Price Confirm ✓")
+        s3 = min(1.0, (c.price_change_24h / 15) * (c.volume_spike_ratio / 3)); signals.append("Vol/Price Confirmed")
     elif c.price_change_24h > 3 and c.volume_spike_ratio < 1.0:
-        s3 = 0.20; signals.append("Price up / Vol weak — unconfirmed")
+        s3 = 0.20; signals.append("Price up / Vol weak")
     elif c.price_change_24h < -3 and c.volume_spike_ratio < 0.8:
-        s3 = 0.55; signals.append("Exhaustion Sell — low vol drop")
-    sub["price_vol_confirm"] = round(s3, 3)
-
-    s4 = 0.40   # Relative Volume Rank — يُضبط في ScanEngine
+        s3 = 0.55; signals.append("Exhaustion Sell")
+    sub["price_vol"] = round(s3, 3)
+    s4 = 0.40
     sub["relative_rank"] = round(s4, 3)
-
     final = round(min(1.0, s1*0.40 + s2*0.25 + s3*0.25 + s4*0.10), 4)
     return DimensionScore("Volume Confirmation", final, self.WEIGHT, signals, sub)
 ```
-
-# ── البُعد 4: Order Flow & Clusters (15%) ────────────────────────────────────
 
 class D4_OrderFlowClusters:
 WEIGHT = 0.15
@@ -808,52 +654,41 @@ WEIGHT = 0.15
 ```
 def score(self, c: CoinData) -> DimensionScore:
     signals, sub = [], {}
-
-    # Buy Wall Dominance
     s1 = 0.0
     total_w = c.buy_wall_usd + c.sell_wall_usd
     if total_w > 0:
         buy_dom = c.buy_wall_usd / total_w
-        if   buy_dom > 0.65: s1 = min(1.0, buy_dom * 1.3); signals.append(f"Buy Wall {buy_dom*100:.0f}%")
+        if   buy_dom > 0.65: s1 = min(1.0, buy_dom * 1.3); signals.append("Buy Wall %.0f%%" % (buy_dom*100))
         elif buy_dom > 0.50: s1 = 0.55
-        else:                s1 = max(0.0, buy_dom); signals.append(f"Sell Wall Dominant")
+        else:                s1 = max(0.0, buy_dom); signals.append("Sell Wall Dominant")
     sub["wall_dominance"] = round(s1, 3)
-
-    # Bid/Ask Ratio
     s2 = 0.0
     if c.bid_ask_ratio > 0:
         r = c.bid_ask_ratio
-        if   r > 1.3:        s2 = min(1.0, 0.60 + (r - 1.3) * 0.5); signals.append(f"Bid/Ask={r:.2f} — Buy Pressure")
+        if   r > 1.3:         s2 = min(1.0, 0.60 + (r - 1.3) * 0.5); signals.append("Bid/Ask=%.2f Buy Pressure" % r)
         elif 0.9 <= r <= 1.3: s2 = 0.45
-        else:                 s2 = max(0.10, r * 0.40); signals.append(f"Bid/Ask={r:.2f} — Sell Pressure")
+        else:                  s2 = max(0.10, r * 0.40); signals.append("Bid/Ask=%.2f Sell Pressure" % r)
     sub["bid_ask"] = round(s2, 3)
-
-    # Funding + OI Alignment
     s3 = 0.35
     if c.has_binance_futures:
         if   c.funding_rate < -0.01 and c.oi_change_24h > 5:
             s3 = min(1.0, 0.70 + abs(c.funding_rate) * 10 + c.oi_change_24h / 100)
-            signals.append(f"Short Squeeze Setup ✓ (FR={c.funding_rate:.4f} / OI={c.oi_change_24h:+.1f}%)")
+            signals.append("Short Squeeze Setup (FR=%.4f / OI=+%.1f%%)" % (c.funding_rate, c.oi_change_24h))
         elif c.funding_rate > 0.05 and c.oi_change_24h < -5:
             s3 = 0.25; signals.append("Long Squeeze Risk")
         elif abs(c.funding_rate) < 0.01:
             s3 = 0.50
     sub["funding_oi"] = round(s3, 3)
-
-    # Fibonacci Cluster
     s4 = 0.30
     if c.ath > c.atl > 0:
-        pct     = (c.price - c.atl) / (c.ath - c.atl)
-        min_d   = min(abs(pct - f) for f in [0.236, 0.382, 0.500, 0.618, 0.786])
-        if   min_d < 0.03: s4 = min(1.0, 0.70 + (0.03 - min_d) * 15); signals.append(f"Near Fib Level ({pct*100:.1f}%)")
+        pct   = (c.price - c.atl) / (c.ath - c.atl)
+        min_d = min(abs(pct - f) for f in [0.236, 0.382, 0.500, 0.618, 0.786])
+        if   min_d < 0.03: s4 = min(1.0, 0.70 + (0.03 - min_d) * 15); signals.append("Near Fib Level (%.1f%%)" % (pct*100))
         elif min_d < 0.07: s4 = 0.50
     sub["fib_cluster"] = round(s4, 3)
-
     final = round(min(1.0, s1*0.30 + s2*0.25 + s3*0.30 + s4*0.15), 4)
-    return DimensionScore("Order Flow & Clusters", final, self.WEIGHT, signals, sub)
+    return DimensionScore("Order Flow Clusters", final, self.WEIGHT, signals, sub)
 ```
-
-# ── البُعد 5: Sector Momentum (12%) ──────────────────────────────────────────
 
 class D5_SectorMomentum:
 WEIGHT = 0.12
@@ -864,19 +699,13 @@ def score(self, c: CoinData) -> DimensionScore:
     rs  = SECTOR_TRACKER.relative_strength(c.sector)
     brd = SECTOR_TRACKER.sector_breadth(c.sector)
     vs  = SECTOR_TRACKER.volume_surge(c.sector, c.volume_24h)
-
-    if rs  > 0.70: signals.append(f"Sector [{c.sector}] outperforming market")
-    if brd > 0.60: signals.append(f"Broad [{c.sector}] rally ({brd*100:.0f}% coins up)")
+    if rs  > 0.70: signals.append("Sector [%s] outperforming" % c.sector)
+    if brd > 0.60: signals.append("Broad [%s] rally (%.0f%% coins up)" % (c.sector, brd*100))
     if vs  > 0.70: signals.append("Above-sector volume surge")
-
     final = round(min(1.0, rs*0.45 + brd*0.35 + vs*0.20), 4)
     return DimensionScore("Sector Momentum", final, self.WEIGHT, signals,
-                          {"relative_strength": round(rs, 3),
-                           "sector_breadth": round(brd, 3),
-                           "volume_surge": round(vs, 3)})
+                          {"rs": round(rs, 3), "breadth": round(brd, 3), "surge": round(vs, 3)})
 ```
-
-# ── البُعد 6: On-Chain Health & Funding (8%) ──────────────────────────────────
 
 class D6_OnChainHealth:
 WEIGHT = 0.08
@@ -884,46 +713,35 @@ WEIGHT = 0.08
 ```
 def score(self, c: CoinData) -> DimensionScore:
     signals, sub = [], {}
-
-    # Developer Activity
     s1 = 0.0
     if c.dev_score > 0:
         s1 = min(1.0, c.dev_score / 80)
         if c.commit_acceleration > 0.5:
             s1 = min(1.0, s1 + 0.20)
-            signals.append(f"Dev Acceleration ✓ (score={c.dev_score:.0f})")
+            signals.append("Dev Acceleration (score=%.0f)" % c.dev_score)
         else:
-            signals.append(f"Dev Activity: {c.dev_score:.0f}/100")
+            signals.append("Dev Activity: %.0f/100" % c.dev_score)
     sub["dev"] = round(s1, 3)
-
-    # Community Score
     s2 = min(1.0, c.community_score / 75) if c.community_score > 0 else 0.0
-    if s2 > 0: signals.append(f"Community: {c.community_score:.0f}/100")
+    if s2 > 0: signals.append("Community: %.0f/100" % c.community_score)
     sub["community"] = round(s2, 3)
-
-    # Funding Sentiment
     s3 = 0.35
     if c.has_binance_futures:
         fr = c.funding_rate
-        if   -0.05 < fr < -0.01: s3 = 0.70; signals.append(f"Healthy Negative Funding ({fr:.4f}%)")
-        elif -0.10 < fr <= -0.05: s3 = 0.85; signals.append(f"Strong Negative Funding — Squeeze setup")
+        if   -0.05 < fr < -0.01:  s3 = 0.70; signals.append("Healthy Negative Funding (%.4f%%)" % fr)
+        elif -0.10 < fr <= -0.05: s3 = 0.85; signals.append("Strong Negative Funding - Squeeze setup")
         elif 0 <= fr <= 0.02:     s3 = 0.55
-        elif fr > 0.05:           s3 = 0.20; signals.append(f"High Positive Funding — risky")
+        elif fr > 0.05:           s3 = 0.20; signals.append("High Positive Funding - risky")
     sub["funding"] = round(s3, 3)
-
-    # OI Trend
     s4 = 0.35
     if c.has_binance_futures and c.open_interest > 0:
         oi = c.oi_change_24h
-        if 3 <= oi <= 20: s4 = min(1.0, 0.55 + oi / 40); signals.append(f"OI Growing +{oi:.1f}%")
+        if 3 <= oi <= 20: s4 = min(1.0, 0.55 + oi / 40); signals.append("OI Growing +%.1f%%" % oi)
         elif oi < -5:     s4 = 0.20
     sub["oi_trend"] = round(s4, 3)
-
     final = round(min(1.0, s1*0.30 + s2*0.20 + s3*0.30 + s4*0.20), 4)
-    return DimensionScore("On-Chain Health & Funding", final, self.WEIGHT, signals, sub)
+    return DimensionScore("OnChain Health", final, self.WEIGHT, signals, sub)
 ```
-
-# ── Scan Engine ───────────────────────────────────────────────────────────────
 
 class ScanEngine:
 
@@ -937,12 +755,12 @@ def __init__(self):
     self.d6 = D6_OnChainHealth()
 
 def _data_quality(self, c: CoinData) -> str:
-    if c.has_binance_spot and c.has_binance_futures: return "✅ FULL"
-    if c.has_binance_spot:                           return "⚠️ PARTIAL"
-    return "❌ LIMITED"
+    if c.has_binance_spot and c.has_binance_futures: return "FULL"
+    if c.has_binance_spot:                           return "PARTIAL"
+    return "LIMITED"
 
 def _confidence(self, score: float, quality: str) -> str:
-    penalty = quality == "❌ LIMITED"
+    penalty = quality == "LIMITED"
     for thr, lbl in [(4.5, "ULTRA"), (4.0, "HIGH"), (3.5, "MEDIUM"), (0, "LOW")]:
         if score >= thr:
             if penalty and lbl in ("ULTRA", "HIGH"):
@@ -961,14 +779,14 @@ def _risk(self, c: CoinData) -> str:
 
 def _entry(self, c: CoinData, dims: list) -> str:
     if dims[0].score > 0.70 and dims[1].score > 0.65:
-        return "دخول عند تثبيت سعري فوق Order Block مع تأكيد حجم"
+        return "Entry on OB confirmation with volume"
     if dims[2].score > 0.75:
-        return "دخول على Breakout مؤكد بحجم — SL تحت قاع آخر 4 شمعات"
+        return "Breakout entry confirmed by volume - SL below last 4 candles"
     if any("Squeeze" in s for d in dims[:2] for s in d.signals):
-        return "دخول تدريجي في منطقة التراكم — استهداف Squeeze قصير الأجل"
+        return "Scale-in at accumulation zone - targeting short squeeze"
     if any("Absorption" in s for s in dims[1].signals):
-        return "دخول بعد Absorption confirmation — انتظار شمعة انعكاس"
-    return "دخول عند اختبار منطقة الدعم مع تأكيد حجم"
+        return "Entry after absorption confirmation - wait for reversal candle"
+    return "Entry at support retest with volume confirmation"
 
 def _sl_tp(self, c: CoinData, risk: str, score: float):
     vol = c.price_volatility if c.price_volatility > 0 else 0.03
@@ -993,47 +811,39 @@ def _make_analysis(self, coin: CoinData, dims: list) -> CoinAnalysis:
         stop_loss_pct=sl, tp1_pct=tp1, tp2_pct=tp2,
     )
 
-def scan_all(self, coins: list[CoinData]) -> list[CoinAnalysis]:
-    # حساب أبعاد كل العملات
+def scan_all(self, coins: list) -> list:
     raw = []
     for c in coins:
         dims = [self.d1.score(c), self.d2.score(c), self.d3.score(c),
                 self.d4.score(c), self.d5.score(c), self.d6.score(c)]
         raw.append((c, dims))
-
-    # ضبط Relative Volume Rank
     max_spike = max((c.volume_spike_ratio for c, _ in raw), default=1.0) or 1.0
     for c, dims in raw:
         rank_score = round(c.volume_spike_ratio / max_spike, 3)
         dims[2].sub_scores["relative_rank"] = rank_score
         dims[2].score = round(min(1.0, dims[2].score * 0.90 + rank_score * 0.10), 4)
-
     results = [self._make_analysis(c, dims) for c, dims in raw]
     return sorted(results, key=lambda x: x.final_score, reverse=True)
 ```
 
-# ══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
-# ┌─────────────────────────────────────────────────────────────────────────┐
+# SECTION 5 - ALERT MANAGER + TELEGRAM
 
-# │  SECTION 5 — نظام التنبيهات (Alert Manager)                            │
-
-# └─────────────────────────────────────────────────────────────────────────┘
-
-# ══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 class CooldownManager:
 
 ```
 def __init__(self):
-    self._history: dict[str, dict] = {}
+    self._history: dict = {}
 
 def _cooldown(self, score: float) -> int:
-    if score >= CONFIG["ALERT_ULTRA"]:   return CONFIG["COOLDOWN_ULTRA_MIN"]
-    if score >= CONFIG["ALERT_STRONG"]:  return CONFIG["COOLDOWN_STRONG_MIN"]
+    if score >= CONFIG["ALERT_ULTRA"]:  return CONFIG["COOLDOWN_ULTRA_MIN"]
+    if score >= CONFIG["ALERT_STRONG"]: return CONFIG["COOLDOWN_STRONG_MIN"]
     return CONFIG["COOLDOWN_MODERATE_MIN"]
 
-def should_alert(self, symbol: str, score: float) -> tuple[bool, str]:
+def should_alert(self, symbol: str, score: float) -> tuple:
     entry = self._history.get(symbol)
     if entry is None:
         return True, "first_alert"
@@ -1041,8 +851,8 @@ def should_alert(self, symbol: str, score: float) -> tuple[bool, str]:
     if elapsed >= self._cooldown(entry["score"]):
         return True, "cooldown_expired"
     if score >= entry["score"] + CONFIG["SCORE_JUMP_OVERRIDE"]:
-        return True, f"score_jump +{score - entry['score']:.1f}"
-    return False, f"cooldown ({elapsed:.0f}/{self._cooldown(entry['score'])}min)"
+        return True, "score_jump +%.1f" % (score - entry["score"])
+    return False, "cooldown (%.0f/%.0fmin)" % (elapsed, self._cooldown(entry["score"]))
 
 def record(self, symbol: str, score: float):
     self._history[symbol] = {"score": score, "time": datetime.utcnow()}
@@ -1051,113 +861,110 @@ def record(self, symbol: str, score: float):
 class MessageFormatter:
 
 ```
-RISK  = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}
-CONF  = {"LOW": "○", "MEDIUM": "◐", "HIGH": "●", "ULTRA": "⬤"}
-
 def _mc(self, mc: float) -> str:
-    if mc >= 1e9: return f"${mc/1e9:.2f}B"
-    if mc >= 1e6: return f"${mc/1e6:.0f}M"
-    return f"${mc:,.0f}"
+    if mc >= 1e9: return "$%.2fB" % (mc / 1e9)
+    if mc >= 1e6: return "$%.0fM" % (mc / 1e6)
+    return "$%.0f" % mc
 
 def _bar(self, score: float, width: int = 10) -> str:
     f = round(score / 5 * width)
-    return "█" * f + "░" * (width - f)
+    return "|" + "#" * f + "-" * (width - f) + "|"
 
 def format_alert(self, a: CoinAnalysis, reason: str = "") -> str:
     c   = a.coin
     now = datetime.utcnow().strftime("%H:%M UTC")
+    label = a.score_label()
     lines = [
-        f"{a.score_label()}",
-        f"{'━'*34}",
-        f"💎 <b>{c.name}</b>  (<code>{c.symbol}</code>)",
-        f"📊 MC: <b>{self._mc(c.market_cap)}</b>  |  رتبة #{c.rank}",
-        f"💰 السعر: <b>${c.price:,.4g}</b>",
-        f"",
-        f"⚡ قوة الإشارة:  <b>{a.final_score:.1f} / 5.0</b>",
-        f"   {self._bar(a.final_score)}",
-        f"",
-        f"📐 <b>الأبعاد:</b>",
+        "*** %s ***" % label,
+        "=" * 34,
+        "Coin : %s (%s)" % (c.name, c.symbol),
+        "MC   : %s  |  Rank #%d" % (self._mc(c.market_cap), c.rank),
+        "Price: $%s" % ("%.4g" % c.price),
+        "",
+        "Signal Strength : %.1f / 5.0" % a.final_score,
+        "  %s" % self._bar(a.final_score),
+        "",
+        "--- Dimensions ---",
     ]
     for d in a.dimensions:
-        bar = "■" * round(d.score * 5) + "□" * (5 - round(d.score * 5))
-        lines.append(f"  {bar} {d.score:.2f} — {d.name}")
+        bar = "#" * round(d.score * 5) + "-" * (5 - round(d.score * 5))
+        lines.append("  [%s] %.2f  %s" % (bar, d.score, d.name))
     lines += [
-        f"",
-        f"🎯 الثقة: {self.CONF.get(a.confidence,'○')} <b>{a.confidence}</b>   "
-        f"⚠️ المخاطرة: {self.RISK.get(a.risk_level,'🔴')} <b>{a.risk_level}</b>",
-        f"🗂️ البيانات: {a.data_quality}",
-        f"",
-        f"📍 <b>سيناريو الدخول:</b>",
-        f"   {a.entry_scenario}",
-        f"",
-        f"🛡️ <b>إدارة المخاطرة:</b>",
-        f"   SL: -{a.stop_loss_pct:.1f}%   TP1: +{a.tp1_pct:.1f}%   TP2: +{a.tp2_pct:.1f}%",
-        f"",
-        f"🏷️ القطاع: <b>{c.sector}</b>",
-        f"📈 1h {c.price_change_1h:+.1f}%  |  24h {c.price_change_24h:+.1f}%  |  7d {c.price_change_7d:+.1f}%",
+        "",
+        "Confidence : %s   Risk: %s" % (a.confidence, a.risk_level),
+        "Data Quality: %s" % a.data_quality,
+        "",
+        "Entry Scenario:",
+        "  %s" % a.entry_scenario,
+        "",
+        "Risk Management:",
+        "  SL : -%.1f%%" % a.stop_loss_pct,
+        "  TP1: +%.1f%%" % a.tp1_pct,
+        "  TP2: +%.1f%%" % a.tp2_pct,
+        "",
+        "Sector: %s" % c.sector,
+        "Change: 1h %+.1f%%  24h %+.1f%%  7d %+.1f%%" % (
+            c.price_change_1h, c.price_change_24h, c.price_change_7d),
     ]
-    # أبرز الإشارات
     top = [s for d in a.dimensions for s in d.signals[:1]][:4]
     if top:
-        lines += ["", "🔍 <b>أبرز الإشارات:</b>"]
+        lines += ["", "Top Signals:"]
         for s in top:
-            lines.append(f"   • {s}")
-    lines += [
-        f"",
-        f"{'━'*34}",
-        f"🕐 {now}  |  <i>LRS v3 Pro</i>",
-    ]
+            lines.append("  * %s" % s)
+    lines += ["", "=" * 34, "Time: %s  |  LRS v3 Pro" % now]
     if "score_jump" in reason:
-        lines.append("⬆️ <i>تحديث: ارتفاع ملحوظ في التقييم</i>")
+        lines.append("^ Score jump detected")
     return "\n".join(lines)
 
-def format_summary(self, sent: list[CoinAnalysis],
-                   duration: float, total: int) -> str:
+def format_summary(self, sent: list, duration: float, total: int) -> str:
     now = datetime.utcnow().strftime("%H:%M UTC")
     lines = [
-        f"📋 <b>ملخص دورة الفحص</b>",
-        f"{'━'*28}",
-        f"🕐 {now}  |  فُحص: {total} عملة",
-        f"⏱️ المدة: {duration:.0f}s  |  تنبيهات: {len(sent)}",
+        "--- Scan Summary ---",
+        "Time   : %s" % now,
+        "Scanned: %d coins" % total,
+        "Time   : %.0fs" % duration,
+        "Alerts : %d sent" % len(sent),
     ]
     if sent:
-        lines += ["", "🏆 <b>أقوى 5 إشارات:</b>"]
+        lines += ["", "Top 5 Signals:"]
         for i, a in enumerate(sent[:5], 1):
-            lines.append(f"  {i}. {a.coin.symbol:8} {a.score_label()} — {a.final_score:.1f}")
-    lines.append(f"{'━'*28}")
+            lines.append("  %d. %-8s [%s] %.1f" % (
+                i, a.coin.symbol, a.score_label(), a.final_score))
+    lines.append("-" * 28)
     return "\n".join(lines)
 ```
 
 class TelegramSender:
 
 ```
-URL = "https://api.telegram.org/bot{token}/sendMessage"
+URL = "https://api.telegram.org/bot%s/sendMessage"
 
 def __init__(self):
     self.token   = CONFIG["TELEGRAM_BOT_TOKEN"]
     self.chat_id = CONFIG["TELEGRAM_CHAT_ID"]
-    if "ضع_" in self.token or "ضع_" in str(self.chat_id):
-        log.error("⛔ بيانات Telegram غير مُعدَّة — افتح السكريبت وعدّل TELEGRAM_BOT_TOKEN و TELEGRAM_CHAT_ID")
+    if "PUT_YOUR" in self.token or "PUT_YOUR" in str(self.chat_id):
+        log.error("Telegram not configured - set BOT_TOKEN and CHAT_ID in CONFIG")
 
 def send(self, text: str) -> bool:
-    url = self.URL.format(token=self.token)
+    url = self.URL % self.token
     for attempt in range(3):
         try:
             r = requests.post(url, json={
-                "chat_id": self.chat_id, "text": text,
-                "parse_mode": "HTML", "disable_web_page_preview": True,
+                "chat_id": self.chat_id,
+                "text": text,
+                "disable_web_page_preview": True,
             }, timeout=10)
             if r.status_code == 200:
                 return True
-            log.warning(f"Telegram [{r.status_code}]: {r.text[:80]}")
+            log.warning("Telegram [%d]: %s", r.status_code, r.text[:80])
         except requests.RequestException as e:
-            log.warning(f"Telegram error (attempt {attempt+1}): {e}")
+            log.warning("Telegram error (attempt %d): %s", attempt + 1, e)
         time.sleep(2 ** attempt)
     return False
 
 def test_connection(self) -> bool:
-    ok = self.send("✅ <b>LRS v3 Pro</b> — اتصال ناجح!\nالنظام يعمل وجاهز.")
-    log.info("✅ Telegram متصل" if ok else "❌ فشل اتصال Telegram")
+    ok = self.send("LRS v3 Pro - Connection OK. System is running.")
+    log.info("Telegram: %s", "connected" if ok else "FAILED - check config")
     return ok
 ```
 
@@ -1170,36 +977,26 @@ def __init__(self):
     self.telegram  = TelegramSender()
     self._sent     = 0
 
-def process(self, analyses: list[CoinAnalysis],
-            duration: float = 0, total: int = 0) -> list[CoinAnalysis]:
+def process(self, analyses: list, duration: float = 0, total: int = 0) -> list:
     sent = []
     for a in analyses:
         c, sc = a.coin, a.final_score
-
-        # فلتر الماركت كاب
         in_mid   = CONFIG["MC_MID_MIN"] <= c.market_cap <= CONFIG["MC_MID_MAX"]
         in_small = CONFIG["MC_SMALL_MIN"] <= c.market_cap <= CONFIG["MC_SMALL_MAX"]
         if not (in_mid or in_small): continue
         if in_small and sc < CONFIG["SMALL_CAP_MIN_SCORE"]: continue
-
-        # فلتر العتبة
         if sc < CONFIG["ALERT_MIN"]: break
-
-        # فلتر Cooldown
         ok, reason = self.cooldown.should_alert(c.symbol, sc)
         if not ok:
-            log.debug(f"[SKIP] {c.symbol} {sc:.1f} — {reason}")
+            log.debug("SKIP %s %.1f - %s", c.symbol, sc, reason)
             continue
-
         msg = self.formatter.format_alert(a, reason)
         if self.telegram.send(msg):
             self.cooldown.record(c.symbol, sc)
             sent.append(a)
             self._sent += 1
-            log.info(f"📨 {c.symbol:8} {a.score_label()} {sc:.1f} ({reason})")
+            log.info("ALERT: %-8s [%s] %.1f (%s)", c.symbol, a.score_label(), sc, reason)
             time.sleep(1.5)
-
-    # ملخص الدورة
     self.telegram.send(self.formatter.format_summary(sent, duration, total))
     return sent
 
@@ -1208,15 +1005,11 @@ def total_sent(self) -> int:
     return self._sent
 ```
 
-# ══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
-# ┌─────────────────────────────────────────────────────────────────────────┐
+# SECTION 6 - WEBSOCKET MONITOR
 
-# │  SECTION 6 — WebSocket Monitor                                         │
-
-# └─────────────────────────────────────────────────────────────────────────┘
-
-# ══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 class LiveCoinState:
 
@@ -1227,7 +1020,7 @@ def __init__(self, symbol: str, baseline_price: float, baseline_vol: float):
     self.baseline_vol   = baseline_vol
     self.current_price  = baseline_price
     self.current_vol    = 0.0
-    self.price_hist: deque = deque(maxlen=20)
+    self.price_hist     = deque(maxlen=20)
     self.alert_triggered = False
 
 def update(self, price: float, vol: float):
@@ -1251,15 +1044,15 @@ class WebSocketMonitor:
 WS_URL = CONFIG["BINANCE_WS_BASE"] + "/stream?streams={streams}"
 
 def __init__(self):
-    self._states: dict[str, LiveCoinState] = {}
-    self._ws     = None
-    self._thread = None
+    self._states  = {}
+    self._ws      = None
+    self._thread  = None
     self._running = False
     self._lock    = threading.Lock()
     self._reconnect_delay = 5
-    self.on_spike = None   # Callback
+    self.on_spike = None
 
-def update_watchlist(self, symbol_map: dict[str, tuple[float, float]]):
+def update_watchlist(self, symbol_map: dict):
     limited = dict(list(symbol_map.items())[:CONFIG["WS_MAX_SYMBOLS"]])
     with self._lock:
         for sym, (price, vol) in limited.items():
@@ -1269,7 +1062,7 @@ def update_watchlist(self, symbol_map: dict[str, tuple[float, float]]):
         to_rm = [s for s in self._states if s.upper() not in limited]
         for s in to_rm:
             del self._states[s]
-    log.info(f"[WS] قائمة المراقبة: {len(self._states)} عملة")
+    log.info("[WS] Watching %d coins", len(self._states))
     if self._running:
         self.restart()
 
@@ -1277,12 +1070,12 @@ def _build_url(self) -> str:
     with self._lock:
         syms = list(self._states.keys())
     if not syms: return ""
-    return self.WS_URL.format(streams="/".join(f"{s}@miniTicker" for s in syms))
+    return self.WS_URL.format(streams="/".join(s + "@miniTicker" for s in syms))
 
 def _on_message(self, ws, message):
     try:
-        d    = json.loads(message).get("data", {})
-        sym  = d.get("s", "").lower()
+        d     = json.loads(message).get("data", {})
+        sym   = d.get("s", "").lower()
         price = float(d.get("c", 0))
         vol   = float(d.get("v", 0))
         with self._lock:
@@ -1297,11 +1090,11 @@ def _check_spike(self, sym: str, state: LiveCoinState):
     price_chg = abs(state.recent_change_pct())
     vspike    = state.vol_spike()
     reasons   = []
-    if price_chg >= CONFIG["WS_PRICE_SPIKE_PCT"]:  reasons.append(f"price={price_chg:.1f}%")
-    if vspike   >= CONFIG["WS_VOLUME_SPIKE_MULT"]: reasons.append(f"vol={vspike:.1f}x")
+    if price_chg >= CONFIG["WS_PRICE_SPIKE_PCT"]:  reasons.append("price=%.1f%%" % price_chg)
+    if vspike   >= CONFIG["WS_VOLUME_SPIKE_MULT"]: reasons.append("vol=%.1fx" % vspike)
     if reasons and not state.alert_triggered:
         state.alert_triggered = True
-        log.info(f"[WS] ⚡ {sym.upper()} — {', '.join(reasons)}")
+        log.info("[WS] Spike: %s - %s", sym.upper(), ", ".join(reasons))
         if self.on_spike:
             self.on_spike(sym.upper(), {
                 "symbol": sym.upper(), "price": state.current_price,
@@ -1313,12 +1106,12 @@ def _check_spike(self, sym: str, state: LiveCoinState):
             state.alert_triggered = False
         threading.Thread(target=reset, daemon=True).start()
 
-def _on_error(self, ws, error): log.warning(f"[WS] {error}")
+def _on_error(self, ws, error): log.warning("[WS] Error: %s", error)
 def _on_open(self, ws):
     self._reconnect_delay = 5
-    log.info(f"[WS] ✅ متصل — {len(self._states)} عملة")
+    log.info("[WS] Connected - watching %d coins", len(self._states))
 def _on_close(self, ws, code, msg):
-    log.info(f"[WS] مغلق ({code})")
+    log.info("[WS] Closed (%s)", code)
     if self._running:
         time.sleep(self._reconnect_delay)
         self._reconnect_delay = min(60, self._reconnect_delay * 2)
@@ -1338,7 +1131,7 @@ def start(self):
     self._running = True
     self._thread  = threading.Thread(target=self._connect, daemon=True, name="WS")
     self._thread.start()
-    log.info("[WS] Monitor بدأ في الخلفية")
+    log.info("[WS] Monitor started")
 
 def stop(self):
     self._running = False
@@ -1347,26 +1140,18 @@ def stop(self):
 def restart(self):
     if self._ws: self._ws.close()
     time.sleep(1)
-
-def get_state(self, symbol: str) -> Optional[LiveCoinState]:
-    with self._lock:
-        return self._states.get(symbol.lower())
 ```
 
-# ══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
-# ┌─────────────────────────────────────────────────────────────────────────┐
+# SECTION 7 - MAIN LOOP
 
-# │  SECTION 7 — الحلقة الرئيسية (Main)                                    │
-
-# └─────────────────────────────────────────────────────────────────────────┘
-
-# ══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 STABLE_KEYWORDS = [“usd”, “usdt”, “usdc”, “busd”, “dai”, “tusd”, “frax”,
 “lusd”, “wrapped”, “staked”, “wbtc”, “weth”, “pax”]
 
-def filter_coins(raw: list[dict]) -> list[dict]:
+def filter_coins(raw: list) -> list:
 result = []
 for coin in raw:
 mc  = float(coin.get(“market_cap”) or 0)
@@ -1383,146 +1168,129 @@ class LiquidityScanner:
 
 ```
 def __init__(self):
-    log.info("🚀 تهيئة Liquidity Rotation Scanner v3 Pro...")
-    self.cg      = CoinGeckoFetcher()
+    log.info("Initializing Liquidity Rotation Scanner v3 Pro...")
+    self.cg       = CoinGeckoFetcher()
     self.enricher = DataEnricher()
-    self.engine  = ScanEngine()
-    self.alerts  = AlertManager()
-    self.ws      = WebSocketMonitor()
+    self.engine   = ScanEngine()
+    self.alerts   = AlertManager()
+    self.ws       = WebSocketMonitor()
     self.ws.on_spike = self._on_ws_spike
-    self._last_analyses: list[CoinAnalysis] = []
+    self._last_analyses = []
     self._cycle = 0
-    log.info("✅ جاهز")
+    log.info("Ready.")
 
 def _on_ws_spike(self, symbol: str, data: dict):
     match = next((a for a in self._last_analyses
                   if a.coin.binance_symbol == symbol), None)
     if not match: return
     msg = (
-        f"⚡ <b>WS Alert: {match.coin.name}</b> (<code>{match.coin.symbol}</code>)\n"
-        f"{'━'*28}\n"
-        f"💰 ${data['price']:,.4g}  ({data['price_chg']:+.1f}%)\n"
-        f"📊 حجم: {data['vol_spike']:.1f}x المعتاد\n"
-        f"🔍 {', '.join(data['reasons'])}\n"
-        f"📋 آخر تقييم: {match.score_label()} {match.final_score:.1f}\n"
-        f"🕐 {datetime.utcnow().strftime('%H:%M UTC')}"
+        "*** WS SPIKE: %s (%s) ***\n"
+        "Price : $%.4g (%+.1f%%)\n"
+        "Volume: %.1fx normal\n"
+        "Reason: %s\n"
+        "Last Score: [%s] %.1f\n"
+        "Time: %s"
+    ) % (
+        match.coin.name, match.coin.symbol,
+        data["price"], data["price_chg"],
+        data["vol_spike"],
+        ", ".join(data["reasons"]),
+        match.score_label(), match.final_score,
+        datetime.utcnow().strftime("%H:%M UTC")
     )
     self.alerts.telegram.send(msg)
 
-def _update_ws(self, analyses: list[CoinAnalysis]):
+def _update_ws(self, analyses: list):
     watchlist = {}
     for a in analyses:
-        if (a.final_score >= CONFIG["WS_WATCH_MIN_SCORE"]
-                and a.coin.binance_symbol):
-            watchlist[a.coin.binance_symbol] = (
-                a.coin.price, a.coin.volume_30d_avg
-            )
+        if a.final_score >= CONFIG["WS_WATCH_MIN_SCORE"] and a.coin.binance_symbol:
+            watchlist[a.coin.binance_symbol] = (a.coin.price, a.coin.volume_30d_avg)
     top = dict(list(watchlist.items())[:CONFIG["WS_MAX_SYMBOLS"]])
     self.ws.update_watchlist(top)
 
-def run_cycle(self) -> list[CoinAnalysis]:
+def run_cycle(self) -> list:
     self._cycle += 1
     start = time.time()
-    log.info(f"\n{'═'*50}")
-    log.info(f"🔄 دورة #{self._cycle} — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
-    log.info(f"{'═'*50}")
+    log.info("=" * 50)
+    log.info("Cycle #%d - %s", self._cycle,
+             datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"))
+    log.info("=" * 50)
     try:
         raw      = self.cg.fetch_top500()
         if not raw: return []
         filtered = filter_coins(raw)
-        log.info(f"📋 بعد الفلترة: {len(filtered)} عملة مؤهلة")
+        log.info("After filter: %d eligible coins", len(filtered))
         coins    = self.enricher.build_list(filtered)
         SECTOR_TRACKER.update(coins)
-        log.info("🧠 بدء التقييم...")
+        log.info("Running analysis...")
         analyses = self.engine.scan_all(coins)
         duration = time.time() - start
         sent     = self.alerts.process(analyses, duration, len(coins))
         self._last_analyses = analyses
         self._update_ws(analyses)
-        log.info(f"🏁 دورة #{self._cycle} — {duration:.0f}s — {len(sent)} تنبيه")
+        log.info("Cycle #%d done - %.0fs - %d alerts", self._cycle, duration, len(sent))
         return analyses
     except Exception as e:
-        log.error(f"❌ خطأ: {e}\n{traceback.format_exc()}")
+        log.error("Cycle error: %s\n%s", e, traceback.format_exc())
         return []
 
 def run_forever(self):
-    log.info("♾️ بدء الحلقة الرئيسية...")
+    log.info("Starting main loop...")
     if not self.alerts.telegram.test_connection():
-        log.error("⛔ تحقق من بيانات Telegram في أعلى السكريبت")
+        log.error("Telegram failed - check BOT_TOKEN and CHAT_ID in CONFIG section")
         sys.exit(1)
     self.ws.start()
     interval = CONFIG["SCAN_INTERVAL_SEC"]
-    log.info(f"⏱️ فترة الفحص: {interval//60} دقيقة")
+    log.info("Scan interval: %d minutes", interval // 60)
     while True:
         try:
             self.run_cycle()
-            log.info(f"💤 انتظار {interval//60} دقيقة...")
+            log.info("Waiting %d minutes...", interval // 60)
             time.sleep(interval)
         except KeyboardInterrupt:
-            log.info("⛔ إيقاف من المستخدم")
+            log.info("Stopped by user")
             self.ws.stop()
             break
         except Exception as e:
-            log.error(f"❌ خطأ غير متوقع: {e}")
+            log.error("Unexpected error: %s", e)
             time.sleep(60)
 ```
 
-# ── وضع الاختبار ──────────────────────────────────────────────────────────────
-
 def run_test():
-log.info(“🧪 وضع الاختبار…”)
-
-```
+log.info(”=== TEST MODE ===”)
 tg = TelegramSender()
 if not tg.test_connection():
-    log.error("❌ فشل Telegram — تحقق من TOKEN و CHAT_ID في أعلى السكريبت")
-    return
-
+log.error(“Telegram FAILED - check BOT_TOKEN and CHAT_ID in CONFIG at top of file”)
+return
 cg  = CoinGeckoFetcher()
 raw = cg.fetch_markets_page(1, 5)
-log.info(f"✅ CoinGecko: {len(raw)} عملة (اختبار)" if raw else "❌ فشل CoinGecko")
-
+log.info(“CoinGecko: %s”, “OK (%d coins)” % len(raw) if raw else “FAILED”)
 bn = BinanceFetcher()
-k  = bn.fetch_klines("BTCUSDT", "1d", 3)
-log.info(f"✅ Binance Klines: {len(k)} شمعات" if k else "❌ فشل Binance Klines")
-
-ob = bn.fetch_order_book("BTCUSDT")
-log.info(f"✅ Order Book: {len(ob.get('bids',[]))} bids" if ob else "❌ فشل Order Book")
-
-fr = bn.fetch_funding_history("BTCUSDT", 3)
-log.info(f"✅ Funding Rate: {fr[-1]['fundingRate'] if fr else 'N/A'}")
-
-log.info("\n✅ الاختبار اكتمل — شغّل بدون --test للبدء الفعلي")
-```
-
-# ── Entry Point ───────────────────────────────────────────────────────────────
+k  = bn.fetch_klines(“BTCUSDT”, “1d”, 3)
+log.info(“Binance Klines: %s”, “OK (%d candles)” % len(k) if k else “FAILED”)
+ob = bn.fetch_order_book(“BTCUSDT”)
+log.info(“Order Book: %s”, “OK (%d bids)” % len(ob.get(“bids”, [])) if ob else “FAILED”)
+fr = bn.fetch_funding_history(“BTCUSDT”, 3)
+log.info(“Funding Rate: %s”, “OK (%s)” % fr[-1][“fundingRate”] if fr else “N/A (Futures)”)
+log.info(”=== TEST COMPLETE - run without –test to start ===”)
 
 def main():
 parser = argparse.ArgumentParser(description=“Liquidity Rotation Scanner v3 Pro”)
-parser.add_argument(”–test”, action=“store_true”, help=“اختبار الاتصالات فقط”)
-parser.add_argument(”–once”, action=“store_true”, help=“دورة واحدة ثم توقف”)
+parser.add_argument(”–test”, action=“store_true”, help=“Test connections only”)
+parser.add_argument(”–once”, action=“store_true”, help=“Run one cycle then stop”)
 args = parser.parse_args()
-
-```
-log.info("╔══════════════════════════════════════════╗")
-log.info("║  Liquidity Rotation Scanner v3 Pro       ║")
-log.info("║  Smart Money | ICT | Whale Detection     ║")
-log.info("╚══════════════════════════════════════════╝")
-
+log.info(“Liquidity Rotation Scanner v3 Pro”)
+log.info(“Smart Money | ICT | Whale Detection”)
 if args.test:
-    run_test()
-    return
-
+run_test()
+return
 scanner = LiquidityScanner()
-
 if args.once:
-    scanner.ws.start()
-    scanner.run_cycle()
-    scanner.ws.stop()
-    return
-
+scanner.ws.start()
+scanner.run_cycle()
+scanner.ws.stop()
+return
 scanner.run_forever()
-```
 
 if **name** == “**main**”:
 main()
