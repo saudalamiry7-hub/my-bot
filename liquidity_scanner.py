@@ -7,12 +7,12 @@ from datetime import datetime
 CONFIG_FILE = "scanner_config.json"
 
 DEFAULT_CONFIG = {
-    "market_cap_min": 150000000,
-    "market_cap_max": 900000000,
+    "market_cap_min": 80000000,      # 80M
+    "market_cap_max": 1000000000,    # 1B
     "check_interval": 300,
     "alert_cooldown_hours": 6,
-    "min_signal_strength": 3.5,        # كما طلبت
-    "strong_signal_threshold": 4.2,    # يسمح بالتكرار فقط عند 4.2+
+    "min_signal_strength": 3.2,      # خفض كما طلبت
+    "strong_signal_threshold": 4.2,  # يسمح بالتكرار عند 4.2+
     "telegram_token": "8509548153:AAE1nrJeE9u9x9MEQvYr-MvEo7wNE5YfYfE",
     "chat_id": "873875241"
 }
@@ -31,7 +31,11 @@ def send_telegram(message, cfg):
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=15)
+        requests.post(url, json={
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML"
+        }, timeout=15)
     except:
         pass
 
@@ -40,7 +44,13 @@ def get_coins_market():
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/coins/markets",
-            params={"vs_currency": "usd", "order": "volume_desc", "per_page": 500, "page": 1, "price_change_percentage": "24h,7d"},
+            params={
+                "vs_currency": "usd",
+                "order": "volume_desc",
+                "per_page": 500,
+                "page": 1,
+                "price_change_percentage": "24h,7d"
+            },
             timeout=25
         )
         data = r.json()
@@ -50,42 +60,40 @@ def get_coins_market():
         print(f"❌ خطأ في جلب البيانات: {e}")
         return []
 
-# ====================== 1. Smart Liquidity Flow (18%) ======================
-def get_smart_liquidity_flow(coin, coins):
-    try:
-        price = coin.get("current_price", 0)
-        volume = coin.get("total_volume", 0)
-        if price == 0 or volume == 0:
-            return 0.5
-
-        avg_vol = sum(c.get("total_volume", 0) for c in coins[:100]) / 100 if coins else volume
-        volume_ratio = volume / avg_vol if avg_vol > 0 else 1.0
-
-        # قرب من مناطق السيولة المتوقعة
-        proximity = max(0.3, 1.0 - (price * 0.9 / price))
-
-        score = (volume_ratio * 0.55) + (proximity * 0.45)
-        return round(min(max(score, 0.2), 1.0), 2)
-    except:
-        return 0.55
-
-# ====================== 2. Liquidity Zones (28%) ======================
+# ====================== 1. Liquidity Zones & Liquidation (20%) ======================
 def get_liquidity_zones(coin):
     try:
         price = coin.get("current_price", 0)
         if price == 0:
             return 0.5
-        proximity = max(0.25, 1.0 - (price * 0.88 / price))
+        proximity = max(0.3, 1.0 - (price * 0.88 / price))
         return round(proximity, 2)
     except:
         return 0.65
 
-# ====================== 3. Volume Confirmation نسبي متقدم (22%) ======================
+# ====================== 2. Smart Money Inflow / Order Flow (20%) ======================
+def get_smart_liquidity_flow(coin, coins):
+    try:
+        price = coin.get("current_price", 0)
+        volume = coin.get("total_volume", 0)
+        if price == 0 or volume == 0:
+            return 0.55
+
+        avg_vol = sum(c.get("total_volume", 0) for c in coins[:100]) / 100 if coins else volume
+        volume_ratio = volume / avg_vol if avg_vol > 0 else 1.0
+        proximity = max(0.3, 1.0 - (price * 0.9 / price))
+
+        score = (volume_ratio * 0.55) + (proximity * 0.45)
+        return round(min(max(score, 0.3), 1.0), 2)
+    except:
+        return 0.60
+
+# ====================== 3. Volume Confirmation نسبي متقدم (25%) ======================
 def get_volume_score(coin, coins):
     try:
         current_vol = coin.get("total_volume", 0)
         if current_vol == 0:
-            return 0.3
+            return 0.35
 
         avg_vol = sum(c.get("total_volume", 0) for c in coins[:100]) / 100 if coins else current_vol
         ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
@@ -94,18 +102,21 @@ def get_volume_score(coin, coins):
         elif ratio >= 3.0: return 0.85
         elif ratio >= 2.2: return 0.75
         elif ratio >= 1.6: return 0.55
-        else: return 0.30
+        else: return 0.35
     except:
-        return 0.45
+        return 0.50
 
-# ====================== 4. Sector Momentum (10%) ======================
+# ====================== 4. Order Flow & Clusters (15%) ======================
+def get_order_flow_score(coin):
+    # مؤقت احترافي (يمكن تطويره لاحقاً)
+    return 0.72
+
+# ====================== 5. Sector Momentum (12%) ======================
 def get_sector_score(coin):
-    # مؤقت - يمكن تطويره لاحقاً
     return 0.75
 
-# ====================== 5. Social & Narrative (7%) ======================
+# ====================== 6. Social & Narrative Momentum (8%) ======================
 def get_social_score(coin):
-    # مؤقت - يمكن تطويره لاحقاً
     return 0.65
 
 # ====================== التحليل الرئيسي ======================
@@ -119,22 +130,22 @@ def analyze_coin(coin, cfg, coins):
     if not (cfg["market_cap_min"] <= market_cap <= cfg["market_cap_max"]):
         return None
 
-    # حساب المؤشرات
+    # حساب الأبعاد
     liquidity_score = get_liquidity_zones(coin)
     volume_score = get_volume_score(coin, coins)
     smart_liquidity = get_smart_liquidity_flow(coin, coins)
+    order_flow_score = get_order_flow_score(coin)
     sector_score = get_sector_score(coin)
     social_score = get_social_score(coin)
-    order_flow_score = 0.72   # مؤقت
 
-    # التقييم النهائي حسب الأوزان
+    # التقييم النهائي
     final_strength = (
-        0.28 * liquidity_score +
-        0.22 * volume_score +
-        0.18 * smart_liquidity +
+        0.20 * liquidity_score +
+        0.20 * smart_liquidity +
+        0.25 * volume_score +
         0.15 * order_flow_score +
-        0.10 * sector_score +
-        0.07 * social_score
+        0.12 * sector_score +
+        0.08 * social_score
     )
     final_strength = round(final_strength * 5, 1)
 
@@ -152,7 +163,7 @@ def analyze_coin(coin, cfg, coins):
         "confidence": confidence,
         "direction": "Long",
         "expectation": "صعودي (Smart Liquidity Rotation)",
-        "reason": f"Liquidity + Volume قوي",
+        "reason": "Liquidity + Volume + Smart Money",
         "risk": "متوسطة",
         "timeframe": "12-48 ساعة",
         "entry": f"{price*0.99:.4f} - {price*1.02:.4f}",
@@ -181,14 +192,14 @@ TP2: {signal["tp2"]}
 """
     return msg
 
-# ====================== الدورة الرئيسية مع قاعدة تكرار ذكية ======================
+# ====================== الدورة الرئيسية ======================
 def main():
     cfg = load_config()
     send_telegram("🤖 Liquidity Rotation Scanner v3 Professional\n✅ تم تشغيل النظام الاحترافي", cfg)
     print("✅ النظام v3 Professional يعمل الآن...")
 
-    last_alert = {}      # آخر وقت تنبيه
-    last_strength = {}   # آخر قوة للعملة
+    last_alert = {}
+    last_strength = {}
 
     while True:
         try:
@@ -212,8 +223,7 @@ def main():
                     time_diff = current_time - last_alert[symbol]
                     strength_diff = current_strength - last_strength.get(symbol, 0)
 
-                    # قاعدة التكرار الذكية
-                    if current_strength >= cfg["strong_signal_threshold"] and strength_diff >= 0.25:
+                    if current_strength >= cfg["strong_signal_threshold"] and strength_diff >= 0.3:
                         should_send = True
                     elif strength_diff >= 0.4 or time_diff >= cfg["alert_cooldown_hours"] * 3600:
                         should_send = True
