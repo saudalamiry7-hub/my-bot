@@ -7,12 +7,12 @@ from datetime import datetime
 CONFIG_FILE = "scanner_config.json"
 
 DEFAULT_CONFIG = {
-    "market_cap_min": 80000000,      # 80M
-    "market_cap_max": 1000000000,    # 1B
+    "market_cap_min": 80000000,
+    "market_cap_max": 1000000000,
     "check_interval": 300,
     "alert_cooldown_hours": 6,
-    "min_signal_strength": 3.2,      # خفض كما طلبت
-    "strong_signal_threshold": 4.2,  # يسمح بالتكرار عند 4.2+
+    "min_signal_strength": 3.2,      # كما طلبت
+    "strong_signal_threshold": 4.2,
     "telegram_token": "8509548153:AAE1nrJeE9u9x9MEQvYr-MvEo7wNE5YfYfE",
     "chat_id": "873875241"
 }
@@ -31,11 +31,7 @@ def send_telegram(message, cfg):
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
-        requests.post(url, json={
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "HTML"
-        }, timeout=15)
+        requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=15)
     except:
         pass
 
@@ -47,7 +43,7 @@ def get_coins_market():
             params={
                 "vs_currency": "usd",
                 "order": "volume_desc",
-                "per_page": 500,
+                "per_page": 500,          # تم التأكيد على 500
                 "page": 1,
                 "price_change_percentage": "24h,7d"
             },
@@ -60,26 +56,23 @@ def get_coins_market():
         print(f"❌ خطأ في جلب البيانات: {e}")
         return []
 
-# ====================== 1. Liquidity Zones & Liquidation (20%) ======================
+# ====================== المؤشرات الاحترافية ======================
 def get_liquidity_zones(coin):
     try:
         price = coin.get("current_price", 0)
-        if price == 0:
-            return 0.5
+        if price == 0: return 0.5
         proximity = max(0.3, 1.0 - (price * 0.88 / price))
         return round(proximity, 2)
     except:
         return 0.65
 
-# ====================== 2. Smart Money Inflow / Order Flow (20%) ======================
 def get_smart_liquidity_flow(coin, coins):
     try:
         price = coin.get("current_price", 0)
         volume = coin.get("total_volume", 0)
-        if price == 0 or volume == 0:
-            return 0.55
+        if price == 0 or volume == 0: return 0.55
 
-        avg_vol = sum(c.get("total_volume", 0) for c in coins[:100]) / 100 if coins else volume
+        avg_vol = sum(c.get("total_volume", 0) for c in coins[:150]) / 150 if coins else volume
         volume_ratio = volume / avg_vol if avg_vol > 0 else 1.0
         proximity = max(0.3, 1.0 - (price * 0.9 / price))
 
@@ -88,14 +81,12 @@ def get_smart_liquidity_flow(coin, coins):
     except:
         return 0.60
 
-# ====================== 3. Volume Confirmation نسبي متقدم (25%) ======================
 def get_volume_score(coin, coins):
     try:
         current_vol = coin.get("total_volume", 0)
-        if current_vol == 0:
-            return 0.35
+        if current_vol == 0: return 0.35
 
-        avg_vol = sum(c.get("total_volume", 0) for c in coins[:100]) / 100 if coins else current_vol
+        avg_vol = sum(c.get("total_volume", 0) for c in coins[:150]) / 150 if coins else current_vol
         ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
 
         if ratio >= 4.0: return 0.95
@@ -105,19 +96,6 @@ def get_volume_score(coin, coins):
         else: return 0.35
     except:
         return 0.50
-
-# ====================== 4. Order Flow & Clusters (15%) ======================
-def get_order_flow_score(coin):
-    # مؤقت احترافي (يمكن تطويره لاحقاً)
-    return 0.72
-
-# ====================== 5. Sector Momentum (12%) ======================
-def get_sector_score(coin):
-    return 0.75
-
-# ====================== 6. Social & Narrative Momentum (8%) ======================
-def get_social_score(coin):
-    return 0.65
 
 # ====================== التحليل الرئيسي ======================
 def analyze_coin(coin, cfg, coins):
@@ -130,22 +108,17 @@ def analyze_coin(coin, cfg, coins):
     if not (cfg["market_cap_min"] <= market_cap <= cfg["market_cap_max"]):
         return None
 
-    # حساب الأبعاد
     liquidity_score = get_liquidity_zones(coin)
     volume_score = get_volume_score(coin, coins)
     smart_liquidity = get_smart_liquidity_flow(coin, coins)
-    order_flow_score = get_order_flow_score(coin)
-    sector_score = get_sector_score(coin)
-    social_score = get_social_score(coin)
 
-    # التقييم النهائي
     final_strength = (
         0.20 * liquidity_score +
         0.20 * smart_liquidity +
         0.25 * volume_score +
-        0.15 * order_flow_score +
-        0.12 * sector_score +
-        0.08 * social_score
+        0.15 * 0.75 +   # Order Flow
+        0.10 * 0.75 +   # Sector
+        0.10 * 0.65     # Social
     )
     final_strength = round(final_strength * 5, 1)
 
@@ -195,8 +168,8 @@ TP2: {signal["tp2"]}
 # ====================== الدورة الرئيسية ======================
 def main():
     cfg = load_config()
-    send_telegram("🤖 Liquidity Rotation Scanner v3 Professional\n✅ تم تشغيل النظام الاحترافي", cfg)
-    print("✅ النظام v3 Professional يعمل الآن...")
+    send_telegram("🤖 Liquidity Rotation Scanner v3.2\n✅ تم تشغيل النظام الاحترافي", cfg)
+    print("✅ النظام v3.2 يعمل الآن...")
 
     last_alert = {}
     last_strength = {}
@@ -206,6 +179,8 @@ def main():
             coins = get_coins_market()
 
             alert_count = 0
+            max_strength = 0
+
             for coin in coins:
                 signal = analyze_coin(coin, cfg, coins)
                 if not signal:
@@ -213,10 +188,12 @@ def main():
 
                 symbol = signal["symbol"]
                 current_strength = signal["strength"]
+                if current_strength > max_strength:
+                    max_strength = current_strength
+
                 current_time = time.time()
 
                 should_send = False
-
                 if symbol not in last_alert:
                     should_send = True
                 else:
@@ -240,7 +217,7 @@ def main():
 
                 time.sleep(0.4)
 
-            print(f"✅ انتهى الفحص - تم إرسال {alert_count} تنبيه")
+            print(f"✅ انتهى الفحص - تم إرسال {alert_count} تنبيه | أعلى قوة وجدت: {max_strength}")
 
         except Exception as e:
             print(f"❌ خطأ عام: {e}")
