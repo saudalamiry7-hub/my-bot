@@ -51,8 +51,8 @@ CONFIG = {
     "SMALL_CAP_MIN_SCORE": 3.9,
  
     # --- ALERT THRESHOLDS ---
-    "ALERT_MIN":    3.5,
-    "ALERT_STRONG": 4.0,
+    "ALERT_MIN":    3.0,
+    "ALERT_STRONG": 3.7,
     "ALERT_ULTRA":  4.5,
  
     # --- COOLDOWN (minutes) ---
