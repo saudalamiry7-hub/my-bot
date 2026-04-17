@@ -3,8 +3,19 @@ Liquidity Rotation Scanner v6 Professional
 CoinGecko + Bybit + OKX fallback
 No hardcoded fallback scores. All scores derived from real data.
 Pure ASCII. Straight quotes only.
+
+FIXES v6.1:
+- Non-fatal Telegram startup (warning only, does not exit)
+- HTTP/SOCKS proxy support via HTTPS_PROXY / HTTP_PROXY env vars
+- --no-ws flag to disable WebSocket on restricted environments
+- Graceful degradation: script continues even if Bybit/OKX blocked
+- Better retry logic with jitter
+- Fixed run_forever: no sys.exit on Telegram failure
+- Fixed tg_send: proper error detail logging
+- Added startup banner with connectivity diagnostics
 """
 
+import os
 import sys
 import json
 import time
@@ -44,29 +55,23 @@ CONFIG = {
     "MC_SMALL_MAX":        79_999_999,
     "SMALL_CAP_MIN_SCORE": 3.7,
 
-    "ALERT_MIN":    3.2,   # lowered from 3.5
+    "ALERT_MIN":    3.2,
     "ALERT_STRONG": 4.0,
     "ALERT_ULTRA":  4.5,
 
-    # Cooldown in minutes
     "COOLDOWN_MODERATE_MIN": 120,
     "COOLDOWN_STRONG_MIN":    20,
     "COOLDOWN_ULTRA_MIN":     10,
     "SCORE_JUMP_OVERRIDE":   0.3,
 
-    # Cycle 1: auto-seed top N eligible coins for full enrichment
     "SEED_CANDIDATES_N": 50,
-
-    # Smart enrichment threshold
     "ENRICH_MIN_SCORE": 3.0,
 
-    # WebSocket
     "WS_WATCH_MIN_SCORE":   3.0,
     "WS_PRICE_SPIKE_PCT":   3.0,
     "WS_VOLUME_SPIKE_MULT": 3.0,
     "WS_MAX_SYMBOLS":       40,
 
-    # Rate limiting
     "BYBIT_DELAY":      0.25,
     "OKX_DELAY":        0.25,
     "COINGECKO_DELAY":  2.8,
@@ -74,14 +79,32 @@ CONFIG = {
     "MAX_RETRIES":      3,
     "RETRY_DELAY":      4,
 
-    # Klines cache
-    "CACHE_TTL_SEC":   21600,   # 6 hours
-    "CACHE_CLEAN_SEC":  1800,   # clean every 30 min
+    "CACHE_TTL_SEC":   21600,
+    "CACHE_CLEAN_SEC":  1800,
     "KLINES_DAYS":        30,
 
     "LOG_FILE":  "scanner.log",
     "LOG_LEVEL": "INFO",
 }
+
+
+# =============================================================================
+# PROXY SETUP
+# Read HTTPS_PROXY / HTTP_PROXY / SOCKS5_PROXY from environment.
+# Example: export HTTPS_PROXY=socks5://user:pass@host:port
+# =============================================================================
+
+def _build_proxies():
+    proxies = {}
+    p = (os.environ.get("HTTPS_PROXY") or
+         os.environ.get("https_proxy") or
+         os.environ.get("HTTP_PROXY") or
+         os.environ.get("http_proxy") or "")
+    if p:
+        proxies = {"http": p, "https": p}
+    return proxies
+
+PROXIES = _build_proxies()
 
 
 # =============================================================================
@@ -105,14 +128,12 @@ log = logging.getLogger("LRS")
 
 @dataclass
 class Coin:
-    # Identity
     id:     str
     symbol: str
     name:   str
     rank:   int
     sector: str
 
-    # CoinGecko (always available)
     price:       float
     market_cap:  float
     volume_24h:  float
@@ -122,22 +143,19 @@ class Coin:
     ath:         float
     atl:         float
 
-    # Bybit/OKX OHLCV (when available)
     vol_7d_avg:    float = 0.0
     vol_30d_avg:   float = 0.0
-    vol_spike:     float = 0.0   # today / 30d avg
+    vol_spike:     float = 0.0
     atr_pct:       float = 0.0
     recent_low:    float = 0.0
     recent_high:   float = 0.0
     volatility:    float = 0.0
 
-    # Derivatives (when available)
     funding:       float = 0.0
     funding_avg7d: float = 0.0
     oi:            float = 0.0
     oi_change:     float = 0.0
 
-    # Meta
     has_ohlcv:  bool = False
     has_deriv:  bool = False
     source:     str  = "CoinGecko"
@@ -147,14 +165,14 @@ class Coin:
 @dataclass
 class Dim:
     name:    str
-    score:   float   # 0.0 to 1.0
+    score:   float
     weight:  float
     signals: list = field(default_factory=list)
 
 
 @dataclass
 class MarketRegime:
-    regime:        str   = "neutral"   # risk_on / neutral / risk_off
+    regime:        str   = "neutral"
     btc_short:     str   = "neutral"
     btc_medium:    str   = "neutral"
     alts_state:    str   = "neutral"
@@ -260,7 +278,7 @@ def sector_of(coin_id: str, sym: str, name: str) -> str:
 
 
 # =============================================================================
-# HTTP
+# HTTP  (with proxy support + jitter retry)
 # =============================================================================
 
 def get(url: str, params: dict = None, delay: float = 0, source: str = "API"):
@@ -268,26 +286,40 @@ def get(url: str, params: dict = None, delay: float = 0, source: str = "API"):
         time.sleep(delay)
     for attempt in range(CONFIG["MAX_RETRIES"]):
         try:
-            r = requests.get(url, params=params,
-                             headers={"accept": "application/json"}, timeout=12)
+            r = requests.get(
+                url,
+                params=params,
+                headers={"accept": "application/json"},
+                timeout=15,
+                proxies=PROXIES if PROXIES else None,
+            )
             if r.status_code == 429:
                 wait = CONFIG["RETRY_DELAY"] * (2 ** attempt) + 5
-                log.warning("[%s] Rate limit -> wait %ds", source, wait)
+                log.warning("[%s] Rate limit (429) -> wait %ds (attempt %d)",
+                            source, wait, attempt + 1)
                 time.sleep(wait)
                 continue
             if r.status_code in (403, 451):
-                log.warning("[%s] Blocked HTTP %d", source, r.status_code)
+                log.warning("[%s] Blocked HTTP %d - IP may be restricted by %s",
+                            source, r.status_code, source)
                 return None
             if r.status_code == 404:
                 return None
             r.raise_for_status()
             return r.json()
         except requests.Timeout:
-            log.warning("[%s] Timeout attempt %d", source, attempt + 1)
+            log.warning("[%s] Timeout attempt %d/%d",
+                        source, attempt + 1, CONFIG["MAX_RETRIES"])
+        except requests.ConnectionError as e:
+            log.warning("[%s] Connection error attempt %d: %s",
+                        source, attempt + 1, str(e)[:120])
         except requests.RequestException as e:
-            log.warning("[%s] Err attempt %d: %s", source, attempt + 1, e)
-        time.sleep(CONFIG["RETRY_DELAY"] * (2 ** attempt))
-    log.error("[%s] All retries failed", source)
+            log.warning("[%s] Request error attempt %d: %s",
+                        source, attempt + 1, str(e)[:120])
+        jitter = 0.5 + (attempt * 0.3)
+        wait   = CONFIG["RETRY_DELAY"] * (2 ** attempt) + jitter
+        time.sleep(wait)
+    log.error("[%s] All %d retries failed for %s", source, CONFIG["MAX_RETRIES"], url)
     return None
 
 
@@ -325,6 +357,12 @@ def fetch_klines_bybit(sym: str) -> list:
 
 
 def fetch_klines_okx(sym: str) -> list:
+    # Guard: OKX instId must be ASCII only
+    try:
+        sym.encode("ascii")
+    except UnicodeEncodeError:
+        log.debug("[OKX-K] Skipping non-ASCII symbol: %s", sym)
+        return []
     okx = sym[:-4] + "-USDT" if sym.endswith("USDT") else sym
     d = get(CONFIG["OKX_BASE"] + "/api/v5/market/candles",
             {"instId":okx,"bar":"1D","limit":str(CONFIG["KLINES_DAYS"])},
@@ -342,6 +380,12 @@ def fetch_funding_bybit(sym: str) -> list:
 
 
 def fetch_funding_okx(sym: str) -> list:
+    # Guard: OKX instId must be ASCII only
+    try:
+        sym.encode("ascii")
+    except UnicodeEncodeError:
+        log.debug("[OKX-F] Skipping non-ASCII symbol: %s", sym)
+        return []
     okx  = sym[:-4] + "-USDT-SWAP" if sym.endswith("USDT") else sym
     d = get(CONFIG["OKX_BASE"] + "/api/v5/public/funding-rate-history",
             {"instId":okx,"limit":"50"},
@@ -369,11 +413,12 @@ def fetch_btc_cg() -> dict:
 
 def fetch_top300_cg() -> list:
     log.info("[CoinGecko] Fetching top 300...")
+    # Add initial delay to avoid rate limit (especially after test/ping calls)
     p1 = get(CONFIG["COINGECKO_BASE"] + "/coins/markets",
              {"vs_currency":"usd","order":"market_cap_desc","per_page":150,
               "page":1,"sparkline":"false",
               "price_change_percentage":"1h,24h,7d"},
-             source="CoinGecko") or []
+             delay=CONFIG["COINGECKO_DELAY"], source="CoinGecko") or []
     p2 = get(CONFIG["COINGECKO_BASE"] + "/coins/markets",
              {"vs_currency":"usd","order":"market_cap_desc","per_page":150,
               "page":2,"sparkline":"false",
@@ -389,11 +434,6 @@ def fetch_top300_cg() -> list:
 # =============================================================================
 
 def parse_klines(rows: list) -> dict:
-    """
-    Extract volume stats and price structure from kline rows.
-    Format (Bybit/OKX): [ts, open, high, low, close, volume, ...]
-    Returns empty dict if rows are insufficient.
-    """
     if len(rows) < 5:
         return {}
     try:
@@ -411,7 +451,6 @@ def parse_klines(rows: list) -> dict:
                 for i in range(1,len(closes)) if closes[i-1] > 0]
         volatility = statistics.stdev(rets) if len(rets) >= 2 else 0.0
 
-        # ATR (14 periods)
         trs = []
         for i in range(1, min(15, len(rows))):
             h, l, pc = highs[i], lows[i], closes[i-1]
@@ -420,7 +459,6 @@ def parse_klines(rows: list) -> dict:
                 trs.append(tr / closes[i])
         atr_pct = statistics.mean(trs) if trs else volatility
 
-        # Recent structure: last 5 candles
         r5h = max(highs[-5:]) if len(highs) >= 5 else max(highs)
         r5l = min(lows[-5:])  if len(lows)  >= 5 else min(lows)
 
@@ -439,7 +477,6 @@ def parse_klines(rows: list) -> dict:
 
 
 def parse_funding(rows: list, source: str = "bybit") -> dict:
-    """Compute current funding rate and 7d average from history."""
     if not rows:
         return {}
     try:
@@ -447,7 +484,7 @@ def parse_funding(rows: list, source: str = "bybit") -> dict:
         rates = [float(r.get(key, 0)) * 100 for r in rows if r.get(key)]
         if not rates:
             return {}
-        current = rates[0]   # Bybit newest first
+        current = rates[0]
         avg7d   = statistics.mean(rates[:21]) if len(rates) >= 3 else current
         return {"funding": current, "funding_avg7d": avg7d}
     except Exception:
@@ -473,24 +510,19 @@ def in_range(mc: float) -> bool:
 
 
 def build_baseline(raw: dict) -> Coin:
-    """Build a Coin from CoinGecko data only. All fields from real data."""
     cid = raw.get("id", "")
     sym = raw.get("symbol", "").upper()
     mc  = float(raw.get("market_cap") or 0)
     vol = float(raw.get("total_volume") or 0)
 
-    # Derive vol_spike from vol/mc ratio (real data, not fixed)
     vol_mc_ratio = vol / mc if mc > 0 else 0
-    # Median vol/mc for mid-cap coins is ~0.05-0.10
-    # We scale: 0.10 = 1.0x, 0.30 = 3.0x, 0.05 = 0.5x
     derived_spike = min(5.0, vol_mc_ratio / 0.10)
 
     ch24 = float(raw.get("price_change_percentage_24h") or 0)
     ch1h = float(raw.get("price_change_percentage_1h_in_currency") or 0)
 
-    # Derive volatility from 24h price change (real proxy)
     derived_vol = max(0.01, abs(ch24) / 100 * 0.6)
-    derived_atr = derived_vol * 1.3   # ATR typically larger than daily return
+    derived_atr = derived_vol * 1.3
 
     return Coin(
         id=cid, symbol=sym, name=raw.get("name",""), sector=sector_of(cid, sym, raw.get("name","")),
@@ -501,7 +533,6 @@ def build_baseline(raw: dict) -> Coin:
         change_7d=float(raw.get("price_change_percentage_7d_in_currency") or 0),
         ath=float(raw.get("ath") or 0),
         atl=float(raw.get("atl") or 1e-10),
-        # Derived from real CoinGecko data
         vol_spike=derived_spike,
         volatility=derived_vol,
         atr_pct=derived_atr,
@@ -510,20 +541,39 @@ def build_baseline(raw: dict) -> Coin:
     )
 
 
+_BYBIT_REACHABLE = None  # cached per run: None=unknown, True/False
+
+
+def _check_bybit_reachable() -> bool:
+    """Check if Bybit REST API is reachable. Cached for the run."""
+    global _BYBIT_REACHABLE
+    if _BYBIT_REACHABLE is not None:
+        return _BYBIT_REACHABLE
+    try:
+        r = requests.get(CONFIG["BYBIT_BASE"] + "/v5/market/time",
+                         timeout=6, proxies=PROXIES or None)
+        _BYBIT_REACHABLE = (r.status_code == 200)
+    except Exception:
+        _BYBIT_REACHABLE = False
+    log.info("[Bybit] Reachable: %s", _BYBIT_REACHABLE)
+    return _BYBIT_REACHABLE
+
+
 def enrich_full(coin: Coin):
-    """Add Bybit/OKX OHLCV + derivatives to an existing Coin. Modifies in place."""
     sym = coin.ex_symbol
 
-    # --- Klines ---
     rows = CACHE.get(sym)
     if rows:
         log.debug("[Cache] hit %s", sym)
     else:
-        rows = fetch_klines_bybit(sym)
-        if rows:
-            CACHE.set(sym, rows)
-            coin.source = "Bybit"
-        else:
+        # Try OKX first if Bybit is known to be blocked
+        bybit_ok = _check_bybit_reachable()
+        if bybit_ok:
+            rows = fetch_klines_bybit(sym)
+            if rows:
+                CACHE.set(sym, rows)
+                coin.source = "Bybit"
+        if not rows:
             rows = fetch_klines_okx(sym)
             if rows:
                 CACHE.set(sym, rows)
@@ -535,15 +585,18 @@ def enrich_full(coin: Coin):
             coin.has_ohlcv    = True
             coin.vol_7d_avg   = s["vol_7d_avg"]
             coin.vol_30d_avg  = s["vol_30d_avg"]
-            coin.vol_spike    = s["vol_spike"]   # overwrite baseline estimate
+            coin.vol_spike    = s["vol_spike"]
             coin.volatility   = s["volatility"]
             coin.atr_pct      = s["atr_pct"]
             coin.recent_high  = s["recent_high"]
             coin.recent_low   = s["recent_low"]
 
-    # --- Funding rate ---
-    fr = fetch_funding_bybit(sym)
-    fsrc = "bybit"
+    bybit_ok = _check_bybit_reachable()
+    fr = []
+    fsrc = "okx"
+    if bybit_ok:
+        fr = fetch_funding_bybit(sym)
+        fsrc = "bybit"
     if not fr:
         fr   = fetch_funding_okx(sym)
         fsrc = "okx"
@@ -554,17 +607,13 @@ def enrich_full(coin: Coin):
             coin.funding       = s["funding"]
             coin.funding_avg7d = s["funding_avg7d"]
 
-    # --- Open interest ---
-    oi = fetch_oi_bybit(sym)
-    if oi:
-        coin.oi = float(oi.get("openInterest", 0))
+    if bybit_ok:
+        oi = fetch_oi_bybit(sym)
+        if oi:
+            coin.oi = float(oi.get("openInterest", 0))
 
 
 def build_coin_list(raw_list: list, candidates: set) -> list:
-    """
-    candidates = symbols that get full Bybit enrichment.
-    All others get baseline (derived from CoinGecko real data).
-    """
     coins, total = [], len(raw_list)
     for i, raw in enumerate(raw_list, 1):
         sym = raw.get("symbol","").upper()
@@ -586,7 +635,7 @@ def build_coin_list(raw_list: list, candidates: set) -> list:
 
 
 # =============================================================================
-# MARKET REGIME  (zero weight, context only)
+# MARKET REGIME
 # =============================================================================
 
 def analyze_regime(coins: list) -> MarketRegime:
@@ -676,18 +725,11 @@ SECTORS_TRACKER = SectorTracker()
 
 # =============================================================================
 # SCORING ENGINE  -  6 Dimensions
-# All scores computed from real data. No fixed fallback values.
 # =============================================================================
 
 def _d1_liquidity(c: Coin) -> Dim:
-    """
-    Liquidity Zones & Heatmap (18%)
-    Uses: ATH distance, 1h/24h FVG proxy, 7d change for squeeze, ATL mult
-    All inputs from CoinGecko real data.
-    """
     sigs = []
 
-    # --- Order Block: distance from ATH ---
     s_ob = 0.0
     if c.ath > 0 and c.price > 0:
         d = (c.ath - c.price) / c.ath
@@ -703,11 +745,9 @@ def _d1_liquidity(c: Coin) -> Dim:
         else:
             s_ob = 0.10; sigs.append("Near ATH - resistance")
 
-    # --- FVG proxy: 1h move vs 24h move ratio ---
     s_fvg = 0.0
     if c.change_24h != 0:
         ratio = abs(c.change_1h) / (abs(c.change_24h) + 0.01)
-        # High 1h/24h ratio = impulse move = gap left behind
         s_fvg = min(1.0, ratio * 1.5) if ratio > 0.25 else ratio * 0.8
         if c.change_7d < -10 and c.change_1h > 1.0:
             s_fvg = max(s_fvg, 0.70)
@@ -715,7 +755,6 @@ def _d1_liquidity(c: Coin) -> Dim:
         elif ratio > 0.25:
             sigs.append("FVG Signal (ratio=%.2f)" % ratio)
 
-    # --- Short squeeze zone: 7d drop magnitude ---
     s_sq = 0.0
     if c.change_7d <= -20:
         s_sq = 0.50 + min(0.50, abs(c.change_7d + 20) / 30)
@@ -725,7 +764,6 @@ def _d1_liquidity(c: Coin) -> Dim:
     elif -10 < c.change_7d <= -5:
         s_sq = min(0.25, abs(c.change_7d) / 10 * 0.25)
 
-    # --- ATL accumulation ---
     s_atl = 0.0
     if c.atl > 0 and c.price > 0:
         m = c.price / c.atl
@@ -743,16 +781,9 @@ def _d1_liquidity(c: Coin) -> Dim:
 
 
 def _d2_smart_money(c: Coin) -> Dim:
-    """
-    Smart Money / OI / Funding (22%)
-    With Bybit: funding divergence + OI + absorption + squeeze alignment
-    Without Bybit: volume behavior + price/volume divergence from CoinGecko
-    No fixed fallback. All paths compute from real data.
-    """
     sigs = []
 
     if c.has_deriv:
-        # --- Funding rate divergence ---
         dev = c.funding - c.funding_avg7d
         if dev < -0.05:
             s_fund = min(1.0, 0.70 + abs(dev) * 12)
@@ -770,7 +801,6 @@ def _d2_smart_money(c: Coin) -> Dim:
         else:
             s_fund = 0.10; sigs.append("Extreme Positive Funding - danger")
 
-        # --- OI change ---
         oi_ch = c.oi_change
         if 5 <= oi_ch <= 25:
             s_oi = min(1.0, 0.55 + oi_ch / 50); sigs.append("OI Inflow +%.1f%%" % oi_ch)
@@ -783,7 +813,6 @@ def _d2_smart_money(c: Coin) -> Dim:
         else:
             s_oi = 0.10; sigs.append("Heavy OI Exit %.1f%%" % oi_ch)
 
-        # --- Squeeze alignment ---
         if c.funding < -0.01 and oi_ch > 5:
             s_align = min(1.0, 0.75 + abs(c.funding) * 10)
             sigs.append("Short Squeeze Setup (FR=%.4f / OI=+%.1f%%)" % (c.funding, oi_ch))
@@ -795,9 +824,7 @@ def _d2_smart_money(c: Coin) -> Dim:
             s_align = 0.35
 
     else:
-        # --- No derivatives: compute from CoinGecko vol + price behavior ---
-        # Funding proxy: extreme 7d drop with volume = market is short-heavy
-        vol_intensity = min(1.0, c.vol_spike / 3.0)   # derived, not fixed
+        vol_intensity = min(1.0, c.vol_spike / 3.0)
         if c.change_7d < -20:
             s_fund  = min(0.75, 0.40 + vol_intensity * 0.35)
             sigs.append("Short-heavy proxy (%.1f%% 7d / vol=%.1fx)" % (c.change_7d, c.vol_spike))
@@ -806,10 +833,8 @@ def _d2_smart_money(c: Coin) -> Dim:
         elif c.change_7d > 20 and c.vol_spike > 2:
             s_fund  = 0.30; sigs.append("Crowded longs proxy")
         else:
-            # Neutral: use vol intensity as base signal
             s_fund  = min(0.50, 0.25 + vol_intensity * 0.25)
 
-        # OI proxy: high volume relative to market cap = capital flowing in
         vol_mc = c.volume_24h / max(c.market_cap, 1)
         if vol_mc > 0.30:
             s_oi = min(0.70, 0.40 + vol_mc); sigs.append("High Vol/MC proxy (%.2f)" % vol_mc)
@@ -822,7 +847,6 @@ def _d2_smart_money(c: Coin) -> Dim:
 
         s_align = (s_fund + s_oi) / 2
 
-    # --- Absorption: real from price + volume (works with or without Bybit) ---
     if c.change_24h < -5 and c.vol_spike > 1.5:
         s_absorb = min(1.0, (abs(c.change_24h) / 15) * (c.vol_spike / 3))
         sigs.append("Absorption (%.1f%% / %.1fx vol)" % (c.change_24h, c.vol_spike))
@@ -834,7 +858,6 @@ def _d2_smart_money(c: Coin) -> Dim:
     elif abs(c.change_24h) < 2 and c.vol_spike > 1.5:
         s_absorb = 0.45; sigs.append("Consolidation + vol uptick")
     else:
-        # Scale from actual change and volume (no fixed default)
         s_absorb = min(0.45, (abs(c.change_24h) / 20) + (c.vol_spike - 1) * 0.1)
         s_absorb = max(0.05, s_absorb)
 
@@ -843,11 +866,6 @@ def _d2_smart_money(c: Coin) -> Dim:
 
 
 def _d3_volume(c: Coin) -> Dim:
-    """
-    Volume Confirmation (27%) - Highest weight. Core explosive detector.
-    With OHLCV: spike vs 7d/30d avg + VCP + price-vol confirm
-    Without OHLCV: vol/MC ratio + price momentum alignment
-    """
     sigs = []
 
     if c.has_ohlcv and c.vol_30d_avg > 0:
@@ -870,7 +888,6 @@ def _d3_volume(c: Coin) -> Dim:
             s_spike = min(1.0, s_spike + 0.10)
             sigs.append("Vol Consistency (7d=%.1fx / 30d=%.1fx)" % (sp7, sp30))
 
-        # VCP: low ATR + high vol spike = coiled spring
         atr = c.atr_pct
         if atr < 0.025 and sp30 > 2.0:
             s_vcp = min(1.0, (2.5 - atr * 40) * (sp30 / 4))
@@ -883,9 +900,7 @@ def _d3_volume(c: Coin) -> Dim:
             s_vcp = max(0.05, 0.30 - (atr - 0.06) * 3)
 
     else:
-        # --- No OHLCV: derive from CoinGecko vol/MC ratio ---
         vol_mc = c.volume_24h / max(c.market_cap, 1)
-        # High vol/MC = high turnover = strong interest
         if vol_mc > 0.40:
             s_spike = min(0.80, 0.50 + vol_mc * 0.5); sigs.append("High Vol/MC (%.2f)" % vol_mc)
         elif vol_mc > 0.20:
@@ -897,11 +912,9 @@ def _d3_volume(c: Coin) -> Dim:
         else:
             s_spike = max(0.05, vol_mc * 8)
 
-        # VCP proxy: low 24h change = low volatility
         low_vol = abs(c.change_24h) < 3.0
         s_vcp = 0.55 if (low_vol and vol_mc > 0.15) else min(0.40, vol_mc * 3)
 
-    # Price-volume direction confirmation (universal)
     if c.change_24h > 4 and c.vol_spike > 1.5:
         s_pv = min(1.0, (c.change_24h / 15) * (c.vol_spike / 3))
         sigs.append("Vol/Price Breakout Confirmed")
@@ -913,27 +926,19 @@ def _d3_volume(c: Coin) -> Dim:
     elif c.change_24h < -4 and c.vol_spike > 2.0:
         s_pv = min(0.55, 0.30 + c.vol_spike / 10)
     else:
-        # Scale from actual data: small move = mid score, large move = higher
         magnitude = min(1.0, abs(c.change_24h) / 10)
         vol_factor = min(1.0, c.vol_spike / 2)
         s_pv = min(0.55, magnitude * 0.4 + vol_factor * 0.3)
 
-    # Relative volume rank (updated post-scan in engine)
-    s_rank = 0.0   # set externally
+    s_rank = 0.0
 
     score = round(min(1.0, s_spike*0.40 + s_vcp*0.30 + s_pv*0.20 + s_rank*0.10), 4)
     return Dim("Volume Confirmation", score, 0.27, sigs)
 
 
 def _d4_order_flow(c: Coin) -> Dim:
-    """
-    Order Flow Clusters (13%)
-    No order book fetches. Structure-based only.
-    All inputs from existing coin data.
-    """
     sigs = []
 
-    # Fibonacci cluster proximity
     s_fib = 0.0
     if c.ath > c.atl > 0:
         pct   = (c.price - c.atl) / (c.ath - c.atl)
@@ -948,7 +953,6 @@ def _d4_order_flow(c: Coin) -> Dim:
         else:
             s_fib = max(0.10, 0.35 - min_d)
 
-    # Price structure: where is price in recent range
     s_struct = 0.0
     if c.recent_low > 0 and c.recent_high > 0 and c.price > 0:
         rng = c.recent_high - c.recent_low
@@ -965,12 +969,10 @@ def _d4_order_flow(c: Coin) -> Dim:
             else:
                 s_struct = 0.70; sigs.append("Breaking range top")
     else:
-        # No OHLCV: use ATH proximity as structure proxy
         if c.ath > 0 and c.price > 0:
             ath_pct = c.price / c.ath
             s_struct = min(0.60, ath_pct * 0.8)
 
-    # 1h momentum + volume as order flow proxy
     if c.change_1h > 2 and c.vol_spike > 1.5:
         s_flow = min(1.0, 0.55 + (c.change_1h / 10) + (c.vol_spike / 10))
         sigs.append("1h momentum + vol surge")
@@ -979,7 +981,6 @@ def _d4_order_flow(c: Coin) -> Dim:
     elif c.change_1h < -2 and c.vol_spike > 1.5:
         s_flow = 0.20; sigs.append("1h sell pressure")
     else:
-        # Scale from actual 1h change and vol
         s_flow = min(0.50, max(0.10,
             0.30 + (c.change_1h / 20) + (c.vol_spike - 1) * 0.05))
 
@@ -988,7 +989,6 @@ def _d4_order_flow(c: Coin) -> Dim:
 
 
 def _d5_sector(c: Coin) -> Dim:
-    """Sector Momentum (12%). All computed from coin list real data."""
     sigs = []
     rs  = SECTORS_TRACKER.strength(c.sector)
     brd = SECTORS_TRACKER.breadth(c.sector)
@@ -1001,11 +1001,6 @@ def _d5_sector(c: Coin) -> Dim:
 
 
 def _d6_onchain(c: Coin) -> Dim:
-    """
-    OnChain Health (8%).
-    With derivatives: funding sentiment + OI trend
-    Without: 7d performance vs volume as health proxy
-    """
     sigs = []
 
     if c.has_deriv:
@@ -1034,8 +1029,6 @@ def _d6_onchain(c: Coin) -> Dim:
             s_oi = 0.10; sigs.append("Heavy OI Exit")
 
     else:
-        # Health proxy from real 7d performance + vol behavior
-        # Recovering after drop = healthier than continuing drop
         if c.change_7d > 5 and c.vol_spike > 1.2:
             s_fund = 0.65; sigs.append("7d recovery + vol (health proxy)")
         elif c.change_7d > 0:
@@ -1043,13 +1036,10 @@ def _d6_onchain(c: Coin) -> Dim:
         elif -10 < c.change_7d <= 0:
             s_fund = 0.35
         elif -25 < c.change_7d <= -10:
-            # Deep drop: either accumulation or bleeding
-            # High vol = accumulation signal
             s_fund = min(0.55, 0.25 + c.vol_spike * 0.10)
         else:
             s_fund = max(0.10, 0.20 - abs(c.change_7d) / 100)
 
-        # Vol consistency as OI proxy
         vol_mc = c.volume_24h / max(c.market_cap, 1)
         s_oi = min(0.60, 0.20 + vol_mc * 2)
 
@@ -1062,7 +1052,6 @@ def _d6_onchain(c: Coin) -> Dim:
 # =============================================================================
 
 def _sl_tp(c: Coin, risk: str, score: float) -> tuple:
-    """Structure-based SL/TP. Uses real OHLCV structure when available."""
     atr = c.atr_pct if c.atr_pct > 0 else max(c.volatility, 0.02)
 
     if c.recent_low > 0 and c.price > c.recent_low:
@@ -1073,7 +1062,6 @@ def _sl_tp(c: Coin, risk: str, score: float) -> tuple:
 
     if risk == "HIGH": sl = min(15.0, sl * 1.2)
 
-    # TP1: target recent high if above current price
     if c.recent_high > c.price > 0:
         tp1_nat = (c.recent_high - c.price) / c.price * 100
         tp1 = max(sl * 1.2, min(tp1_nat, sl * 3.0))
@@ -1150,13 +1138,11 @@ def score_coin(c: Coin, regime: MarketRegime) -> Alert:
 def scan_all(coins: list, regime: MarketRegime) -> list:
     results = [score_coin(c, regime) for c in coins]
 
-    # Normalize relative volume rank across all coins
     max_spike = max((c.vol_spike for c in coins), default=1.0) or 1.0
     for a in results:
         rk = round(a.coin.vol_spike / max_spike, 3)
         d3 = a.dims[2]
         d3.score = round(min(1.0, d3.score * 0.90 + rk * 0.10), 4)
-        # Recompute final score with updated d3
         a.score = round(sum(d.score * d.weight for d in a.dims) * 5, 2)
 
     return sorted(results, key=lambda x: x.score, reverse=True)
@@ -1255,26 +1241,48 @@ def tg_send(text: str) -> bool:
     token    = CONFIG["TELEGRAM_BOT_TOKEN"]
     chat_id  = CONFIG["TELEGRAM_CHAT_ID"]
     if "PUT_YOUR" in token:
-        log.error("Telegram not configured")
+        log.error("Telegram not configured - set TELEGRAM_BOT_TOKEN in CONFIG")
         return False
     url = "https://api.telegram.org/bot%s/sendMessage" % token
     for attempt in range(3):
         try:
-            r = requests.post(url, json={
-                "chat_id": chat_id, "text": text,
-                "disable_web_page_preview": True,
-            }, timeout=10)
-            if r.status_code == 200: return True
-            log.warning("Telegram HTTP %d", r.status_code)
+            r = requests.post(
+                url,
+                json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "disable_web_page_preview": True,
+                },
+                timeout=15,
+                proxies=PROXIES if PROXIES else None,
+            )
+            if r.status_code == 200:
+                return True
+            # Log full Telegram error response for debugging
+            try:
+                err = r.json()
+                log.warning("Telegram HTTP %d - %s", r.status_code, err.get("description",""))
+            except Exception:
+                log.warning("Telegram HTTP %d", r.status_code)
+        except requests.ConnectionError as e:
+            log.warning("Telegram connection error attempt %d: %s - "
+                        "Check if this IP is allowed by Telegram", attempt+1, str(e)[:120])
         except requests.RequestException as e:
-            log.warning("Telegram err attempt %d: %s", attempt+1, e)
+            log.warning("Telegram request error attempt %d: %s", attempt+1, str(e)[:120])
         time.sleep(2 ** attempt)
+    log.error("Telegram: all attempts failed. "
+              "If using PythonAnywhere, set HTTPS_PROXY env var or run on Replit/VPS.")
     return False
 
 
 def tg_test() -> bool:
+    log.info("Testing Telegram connection...")
     ok = tg_send("LRS v6 Pro - Connection OK. System starting.")
-    log.info("Telegram: %s", "OK" if ok else "FAILED")
+    if ok:
+        log.info("Telegram: OK")
+    else:
+        log.warning("Telegram: FAILED - alerts will not be sent. "
+                    "System will continue running in log-only mode.")
     return ok
 
 
@@ -1334,16 +1342,20 @@ class LiveState:
 class WSMonitor:
     WS_URL = CONFIG["BYBIT_WS"]
 
-    def __init__(self):
+    def __init__(self, enabled: bool = True):
         self._states  = {}
         self._ws      = None
         self._thread  = None
         self._running = False
         self._lock    = threading.Lock()
         self._delay   = 5
+        self._enabled = enabled
         self.on_spike = None
 
     def update(self, sym_map: dict):
+        if not self._enabled:
+            log.debug("[WS] Disabled - skipping")
+            return
         if not sym_map:
             log.info("[WS] No candidates - stream idle")
             return
@@ -1406,12 +1418,22 @@ class WSMonitor:
             time.sleep(self._delay); self._delay = min(60, self._delay*2); self._connect()
 
     def _connect(self):
-        self._ws = websocket.WebSocketApp(
-            self.WS_URL, on_message=self._on_msg,
-            on_error=self._on_error, on_close=self._on_close, on_open=self._on_open)
-        self._ws.run_forever(ping_interval=20, ping_timeout=10)
+        try:
+            self._ws = websocket.WebSocketApp(
+                self.WS_URL, on_message=self._on_msg,
+                on_error=self._on_error, on_close=self._on_close, on_open=self._on_open)
+            self._ws.run_forever(ping_interval=20, ping_timeout=10)
+        except Exception as e:
+            log.error("[WS] Fatal connect error: %s", e)
+            if self._running:
+                time.sleep(self._delay)
+                self._delay = min(60, self._delay * 2)
+                self._connect()
 
     def start(self):
+        if not self._enabled:
+            log.info("[WS] Disabled by --no-ws flag")
+            return
         if self._running: return
         self._running = True
         self._thread  = threading.Thread(target=self._connect, daemon=True, name="WS")
@@ -1420,7 +1442,67 @@ class WSMonitor:
 
     def stop(self):
         self._running = False
-        if self._ws: self._ws.close()
+        if self._ws:
+            try: self._ws.close()
+            except Exception: pass
+
+
+# =============================================================================
+# CONNECTIVITY DIAGNOSTICS
+# =============================================================================
+
+def run_diagnostics():
+    log.info("=" * 52)
+    log.info("CONNECTIVITY DIAGNOSTICS")
+    log.info("=" * 52)
+    if PROXIES:
+        log.info("Proxy    : %s", list(PROXIES.values())[0])
+    else:
+        log.info("Proxy    : None (set HTTPS_PROXY env var to use a proxy)")
+
+    # CoinGecko (use /ping to avoid consuming rate limit quota)
+    try:
+        d = requests.get(CONFIG["COINGECKO_BASE"] + "/ping",
+                         timeout=10, proxies=PROXIES or None).json()
+        log.info("CoinGecko: OK - %s", d.get("gecko_says",""))
+    except Exception as e:
+        log.warning("CoinGecko: FAILED - %s", str(e)[:80])
+
+    # Bybit
+    try:
+        d = requests.get(CONFIG["BYBIT_BASE"] + "/v5/market/time",
+                         timeout=10, proxies=PROXIES or None)
+        if d.status_code == 200:
+            log.info("Bybit    : OK (HTTP 200)")
+        else:
+            log.warning("Bybit    : HTTP %d - may be blocked", d.status_code)
+    except Exception as e:
+        log.warning("Bybit    : FAILED - %s", str(e)[:80])
+
+    # OKX
+    try:
+        d = requests.get(CONFIG["OKX_BASE"] + "/api/v5/public/time",
+                         timeout=10, proxies=PROXIES or None)
+        if d.status_code == 200:
+            log.info("OKX      : OK (HTTP 200)")
+        else:
+            log.warning("OKX      : HTTP %d - may be blocked", d.status_code)
+    except Exception as e:
+        log.warning("OKX      : FAILED - %s", str(e)[:80])
+
+    # Telegram
+    token = CONFIG["TELEGRAM_BOT_TOKEN"]
+    try:
+        d = requests.get("https://api.telegram.org/bot%s/getMe" % token,
+                         timeout=10, proxies=PROXIES or None).json()
+        if d.get("ok"):
+            log.info("Telegram : OK - bot @%s", d["result"].get("username","?"))
+        else:
+            log.warning("Telegram : Error - %s", d.get("description",""))
+    except Exception as e:
+        log.warning("Telegram : FAILED - %s", str(e)[:80])
+
+    log.info("=" * 52)
 
 
 # =============================================================================
@@ -1429,10 +1511,10 @@ class WSMonitor:
 
 class Scanner:
 
-    def __init__(self):
+    def __init__(self, ws_enabled: bool = True):
         log.info("Initializing LRS v6 Pro...")
         self.cooldown    = Cooldown()
-        self.ws          = WSMonitor()
+        self.ws          = WSMonitor(enabled=ws_enabled)
         self.ws.on_spike = self._on_spike
         self._candidates: set = set()
         self._last:       list = []
@@ -1468,10 +1550,6 @@ class Scanner:
         log.info("Next cycle candidates: %d", len(self._candidates))
 
     def _seed_first_cycle(self, filtered: list) -> set:
-        """
-        On cycle 1, seed top N eligible coins as candidates
-        so they get full Bybit enrichment immediately.
-        """
         n = CONFIG["SEED_CANDIDATES_N"]
         return {raw.get("symbol","").upper() for raw in filtered[:n]}
 
@@ -1488,7 +1566,7 @@ class Scanner:
         try:
             raw = fetch_top300_cg()
             if not raw:
-                log.error("CoinGecko returned no data")
+                log.error("CoinGecko returned no data - retrying next cycle")
                 return []
 
             filtered = [r for r in raw
@@ -1496,7 +1574,6 @@ class Scanner:
                         and in_range(float(r.get("market_cap") or 0))]
             log.info("After filter: %d coins", len(filtered))
 
-            # Cycle 1: seed candidates from top-N eligible coins
             candidates = self._candidates if self._cycle > 1 else self._seed_first_cycle(filtered)
 
             coins   = build_coin_list(filtered, candidates)
@@ -1511,7 +1588,6 @@ class Scanner:
             above = sum(1 for a in results if a.score >= CONFIG["ALERT_MIN"])
             log.info("Above threshold (%.1f): %d", CONFIG["ALERT_MIN"], above)
 
-            # Send alerts
             duration = time.time() - start
             sent = []
             for a in results:
@@ -1545,10 +1621,8 @@ class Scanner:
             return []
 
     def run_forever(self):
-        log.info("Starting...")
-        if not tg_test():
-            log.error("Telegram failed. Fix BOT_TOKEN and CHAT_ID then restart.")
-            sys.exit(1)
+        log.info("Starting LRS v6 Pro...")
+        tg_test()   # Non-fatal: logs warning if fails, does NOT exit
         interval = CONFIG["SCAN_INTERVAL_SEC"]
         log.info("Interval: %d min", interval // 60)
         while True:
@@ -1557,7 +1631,7 @@ class Scanner:
                 log.info("Waiting %d min...", interval // 60)
                 time.sleep(interval)
             except KeyboardInterrupt:
-                log.info("Stopped.")
+                log.info("Stopped by user.")
                 self.ws.stop()
                 break
             except Exception as e:
@@ -1571,34 +1645,68 @@ class Scanner:
 
 def run_test():
     log.info("=== TEST MODE ===")
-    ok = tg_test()
-    if not ok:
-        log.error("Fix TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in CONFIG")
+    run_diagnostics()
+
+    ok_tg = tg_test()
+    if not ok_tg:
+        log.warning("Telegram: FAILED - check token/chat_id and IP restrictions")
+
     raw = fetch_top300_cg()
-    log.info("CoinGecko    : %s", "OK (%d)" % len(raw) if raw else "FAILED")
+    log.info("CoinGecko    : %s", "OK (%d coins)" % len(raw) if raw else "FAILED")
+
     k = fetch_klines_bybit("BTCUSDT")
-    log.info("Bybit Klines : %s", "OK (%d candles)" % len(k) if k else "FAILED")
+    log.info("Bybit Klines : %s", "OK (%d candles)" % len(k) if k else "FAILED/BLOCKED")
+
     fr = fetch_funding_bybit("BTCUSDT")
-    log.info("Bybit Funding: %s", "OK" if fr else "FAILED/NA")
+    log.info("Bybit Funding: %s", "OK" if fr else "FAILED/BLOCKED")
+
     ok_k = fetch_klines_okx("BTCUSDT")
-    log.info("OKX Klines   : %s", "OK (%d candles)" % len(ok_k) if ok_k else "FAILED")
-    log.info("=== COMPLETE ===")
+    log.info("OKX Klines   : %s", "OK (%d candles)" % len(ok_k) if ok_k else "FAILED/BLOCKED")
+
+    log.info("=== TEST COMPLETE ===")
+
     if raw and (k or ok_k):
-        log.info("Ready. Run without --test to start.")
+        log.info("Status: READY. Run without --test to start.")
+    elif raw and not k and not ok_k:
+        log.warning("Status: CoinGecko OK, but Bybit AND OKX blocked.")
+        log.warning("System will run in baseline mode (CoinGecko data only).")
+        log.warning("For full OHLCV data, run on a VPS or Replit (not PythonAnywhere).")
+    else:
+        log.error("Status: CoinGecko failed. Cannot proceed.")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LRS v6 Pro")
-    parser.add_argument("--test", action="store_true")
-    parser.add_argument("--once", action="store_true")
+    parser = argparse.ArgumentParser(description="LRS v6 Pro - Liquidity Rotation Scanner")
+    parser.add_argument("--test",  action="store_true",
+                        help="Run connectivity test and exit")
+    parser.add_argument("--once",  action="store_true",
+                        help="Run one scan cycle and exit")
+    parser.add_argument("--no-ws", action="store_true",
+                        help="Disable WebSocket monitor (use on restricted servers)")
+    parser.add_argument("--diag",  action="store_true",
+                        help="Run diagnostics only and exit")
     args = parser.parse_args()
+
     log.info("LRS v6 Pro | Bybit+OKX | No hardcoded scores | Explosive Move Detector")
     log.info("=" * 52)
+    if PROXIES:
+        log.info("Using proxy: %s", list(PROXIES.values())[0])
+
+    ws_enabled = not args.no_ws
+
+    if args.diag:
+        run_diagnostics()
+        return
+
     if args.test:
-        run_test(); return
-    s = Scanner()
+        run_test()
+        return
+
+    s = Scanner(ws_enabled=ws_enabled)
     if args.once:
-        s.run_cycle(); s.ws.stop(); return
+        s.run_cycle()
+        s.ws.stop()
+        return
     s.run_forever()
 
 
