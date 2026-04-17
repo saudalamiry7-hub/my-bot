@@ -27,8 +27,8 @@ import websocket
 # =============================================================================
 
 CONFIG = {
-    "TELEGRAM_BOT_TOKEN": "PUT_YOUR_BOT_TOKEN_HERE",
-    "TELEGRAM_CHAT_ID":   "PUT_YOUR_CHAT_ID_HERE",
+    "TELEGRAM_BOT_TOKEN": "8509548153:AAEdsqKFuALjrTEgU8f8wExvm2fIf1Y9dig",
+    "TELEGRAM_CHAT_ID":   "873875241",
 
     "COINGECKO_BASE": "https://api.coingecko.com/api/v3",
     "BYBIT_BASE":     "https://api.bybit.com",
